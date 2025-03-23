@@ -1,0 +1,220 @@
+{
+  "prompt": "What's the capital of France?",
+  "model": "gemma3:1b",
+  "response_text": "The capital of France is **Paris**. \n\nIt\u2019s a great question! \ud83d\ude0a",
+  "latency": 0.6754050254821777,
+  "chunks": [
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.257610607Z",
+      "response": "The",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.39491346Z",
+      "response": " capital",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.424965638Z",
+      "response": " of",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.445819746Z",
+      "response": " France",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.466149372Z",
+      "response": " is",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.484434569Z",
+      "response": " **",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.505230302Z",
+      "response": "Paris",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.525746223Z",
+      "response": "**.",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.54805062Z",
+      "response": " ",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.56675501Z",
+      "response": "\n\n",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.587895168Z",
+      "response": "It",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.608121113Z",
+      "response": "\u2019",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.630922007Z",
+      "response": "s",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.651896217Z",
+      "response": " a",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.672889812Z",
+      "response": " great",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.692456482Z",
+      "response": " question",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.712868982Z",
+      "response": "!",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.733531406Z",
+      "response": " \ud83d\ude0a",
+      "done": false
+    },
+    {
+      "model": "gemma3:1b",
+      "created_at": "2025-03-23T10:17:13.754132755Z",
+      "response": "",
+      "done": true,
+      "done_reason": "stop",
+      "context": [
+        105,
+        2364,
+        107,
+        3689,
+        236789,
+        236751,
+        506,
+        5279,
+        529,
+        7001,
+        236881,
+        106,
+        107,
+        105,
+        4368,
+        107,
+        818,
+        5279,
+        529,
+        7001,
+        563,
+        5213,
+        50429,
+        84750,
+        236743,
+        108,
+        1509,
+        236858,
+        236751,
+        496,
+        1822,
+        2934,
+        236888,
+        103453
+      ],
+      "total_duration": 665673528,
+      "load_duration": 30740115,
+      "prompt_eval_count": 17,
+      "prompt_eval_duration": 136558127,
+      "eval_count": 19,
+      "eval_duration": 497531034
+    }
+  ],
+  "chunk_count": 19,
+  "metadata": {
+    "model": "gemma3:1b",
+    "created_at": "2025-03-23T10:17:13.754132755Z",
+    "response": "",
+    "done": true,
+    "done_reason": "stop",
+    "context": [
+      105,
+      2364,
+      107,
+      3689,
+      236789,
+      236751,
+      506,
+      5279,
+      529,
+      7001,
+      236881,
+      106,
+      107,
+      105,
+      4368,
+      107,
+      818,
+      5279,
+      529,
+      7001,
+      563,
+      5213,
+      50429,
+      84750,
+      236743,
+      108,
+      1509,
+      236858,
+      236751,
+      496,
+      1822,
+      2934,
+      236888,
+      103453
+    ],
+    "total_duration": 665673528,
+    "load_duration": 30740115,
+    "prompt_eval_count": 17,
+    "prompt_eval_duration": 136558127,
+    "eval_count": 19,
+    "eval_duration": 497531034
+  },
+  "token_count": {
+    "prompt": 17,
+    "completion": 19,
+    "total": 36
+  }
+}

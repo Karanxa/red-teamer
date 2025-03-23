@@ -1,0 +1,98 @@
+# LLM Red Team Benchmark Report
+
+## Overview
+
+- **Benchmark ID**: {{ benchmark.id }}
+- **Name**: {{ benchmark.name }}
+- **Version**: {{ benchmark.version }}
+- **Date**: {{ benchmark.created_at }}
+
+## Executive Summary
+
+This report presents the results of security testing performed on {{ models|length }} model(s) against a collection of attack vectors designed to assess their resilience to adversarial inputs.
+
+**Overall Success Rate**: {{ "%.2f%%" | format(summary.overall_success_rate * 100) }}
+
+{% if summary.overall_success_rate < benchmark.parameters.success_threshold %}
+⚠️ **Warning**: The overall success rate is below the target threshold of {{ "%.2f%%" | format(benchmark.parameters.success_threshold * 100) }}.
+{% else %}
+✅ The overall success rate meets or exceeds the target threshold of {{ "%.2f%%" | format(benchmark.parameters.success_threshold * 100) }}.
+{% endif %}
+
+### Tested Models
+
+{% for model in models %}
+- **{{ model.model_id }}** ({{ model.provider }}): {{ "%.2f%%" | format(summary.model_success_rates[model.model_id] * 100) }} success rate
+{% endfor %}
+
+### Most Vulnerable Categories
+
+{% for category, rate in most_vulnerable_categories %}
+- **{{ category }}**: {{ "%.2f%%" | format(rate * 100) }}% success rate
+{% endfor %}
+
+## Test Configuration
+
+- **Sample Size**: {{ benchmark.parameters.sample_size }}
+- **Confidence Level**: {{ "%.2f%%" | format(benchmark.parameters.confidence_level * 100) }}
+- **Success Threshold**: {{ "%.2f%%" | format(benchmark.parameters.success_threshold * 100) }}
+- **Progressive Difficulty**: {{ "Yes" if benchmark.parameters.progressive_difficulty else "No" }}
+
+## Results by Model
+
+| Model | Success Rate | Confidence Interval ({{ "%.0f%%" | format(benchmark.parameters.confidence_level * 100) }}) |
+|-------|-------------|-------------|
+{% for model in models %}
+| {{ model.model_id }} | {{ "%.2f%%" | format(summary.model_success_rates[model.model_id] * 100) }} | {{ "%.2f%%" | format(summary.statistical_analysis.confidence_intervals[model.model_id][0] * 100) }} - {{ "%.2f%%" | format(summary.statistical_analysis.confidence_intervals[model.model_id][1] * 100) }} |
+{% endfor %}
+
+## Results by Attack Category
+
+| Category | Success Rate | Samples |
+|----------|-------------|---------|
+{% for category, examples in examples_by_category.items() %}
+| {{ category }} | {{ "%.2f%%" | format(summary.category_success_rates[category] * 100) }} | {{ examples|length }} |
+{% endfor %}
+
+## Results by Severity
+
+| Severity | Success Rate |
+|----------|-------------|
+{% for severity, rate in severity_success_rates.items() %}
+| {{ severity }} | {{ "%.2f%%" | format(rate * 100) }} |
+{% endfor %}
+
+## Statistical Analysis
+
+### P-Values for Model Comparisons
+
+{% if summary.statistical_analysis.p_values %}
+| Comparison | P-Value | Significant Difference |
+|------------|---------|------------------------|
+{% for comparison, p_value in summary.statistical_analysis.p_values.items() %}
+| {{ comparison }} | {{ "%.4f" | format(p_value) if p_value != None else "N/A" }} | {{ "Yes" if p_value != None and p_value < 0.05 else "No" }} |
+{% endfor %}
+{% else %}
+No statistical comparisons available.
+{% endif %}
+
+## Recommendations
+
+{% for recommendation in recommendations %}
+### {{ recommendation.title }} ({{ recommendation.priority }} priority)
+
+{{ recommendation.description }}
+
+{% endfor %}
+
+## Visualizations
+
+![Model Success Rates](visualizations/model_success_rates.png)
+
+![Category Success Rates](visualizations/category_success_rates.png)
+
+![Severity Heatmap](visualizations/severity_heatmap.png)
+
+---
+
+Report generated on {{ timestamp }} using Red Teamer Framework.
