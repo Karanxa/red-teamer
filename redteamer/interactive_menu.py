@@ -315,19 +315,262 @@ def run_custom_model_scan(datasets, dataset_path=None, sample_size="10", verbose
 def interactive_redteam_menu():
     """Menu for running an interactive red team evaluation."""
     print_header()
-    console.print("[bold]Interactive Red Team Evaluation[/bold]")
-    console.print("Run a comprehensive red team evaluation\n")
+    console.print("[bold]Conversation Scan[/bold]")
+    console.print("Run an interactive evaluation with a model\n")
     
-    # Simplified version - in a real implementation, you'd have more options
-    console.print("[yellow]Running interactive red team evaluation...[/yellow]")
+    questions = [
+        inquirer.List(
+            "action",
+            message="What type of conversation scan would you like to run?",
+            choices=[
+                "Manual Conversation Test",
+                "Conversational Red-Teaming Scanner",
+                "Return to Main Menu"
+            ]
+        )
+    ]
     
-    try:
-        subprocess.run(["python", "-m", "redteamer.cli", "run"])
-    except Exception as e:
-        console.print(f"[bold red]Error running command:[/bold red] {str(e)}")
+    answers = inquirer.prompt(questions)
     
-    # Wait for user to press enter before returning to main menu
-    input("\nPress Enter to return to the main menu...")
+    if answers["action"] == "Manual Conversation Test":
+        test_model_menu()
+    elif answers["action"] == "Conversational Red-Teaming Scanner":
+        conversational_redteam_menu()
+    elif answers["action"] == "Return to Main Menu":
+        main_menu()
+
+def conversational_redteam_menu():
+    """Menu for running the conversational red-teaming scanner."""
+    print_header()
+    console.print("[bold]Conversational Red-Teaming Scanner[/bold]")
+    console.print("Automatically test a model with adversarial dialogue\n")
+    
+    # Get available models by provider
+    available_models = get_all_available_models()
+    api_keys = get_api_keys()
+    
+    # Filter models based on available API keys
+    usable_providers = []
+    for provider, has_key in api_keys.items():
+        if has_key:
+            usable_providers.append(provider)
+    
+    # Add Ollama if available
+    if "ollama" in available_models and available_models["ollama"]:
+        usable_providers.append("ollama")
+    
+    # Add curl as an option (always available)
+    usable_providers.append("curl")
+    
+    # Prepare model choices for each provider
+    provider_choices = []
+    for provider in usable_providers:
+        provider_choices.append({
+            "name": f"{provider.capitalize()} Model",
+            "value": provider
+        })
+    
+    # Ask for target model type
+    provider_question = [
+        inquirer.List(
+            "provider",
+            message="Select target model type",
+            choices=provider_choices
+        )
+    ]
+    
+    provider_answer = inquirer.prompt(provider_question)
+    provider = provider_answer["provider"]
+    
+    # Extract the provider value if it's a dictionary
+    provider_value = provider["value"] if isinstance(provider, dict) else provider
+    
+    # Set up model configuration based on provider
+    model_config = {}
+    
+    if provider_value == "curl":
+        # Ask for curl command template
+        curl_questions = [
+            inquirer.Text(
+                "curl_command",
+                message="Enter curl command (use {prompt} and optional {system_prompt} placeholders)"
+            ),
+            inquirer.Text(
+                "system_prompt",
+                message="Enter optional system prompt (leave empty if not needed)"
+            )
+        ]
+        
+        curl_answers = inquirer.prompt(curl_questions)
+        
+        model_config = {
+            "curl_command": curl_answers["curl_command"],
+            "system_prompt": curl_answers["system_prompt"] if curl_answers["system_prompt"] else None
+        }
+        
+        model_name = "Custom curl"
+    elif provider_value == "ollama":
+        # Ask for Ollama model
+        ollama_models = available_models.get("ollama", [])
+        
+        if not ollama_models:
+            console.print("[yellow]No Ollama models detected. Make sure Ollama is running.[/yellow]")
+            console.print("Returning to main menu...")
+            input("\nPress Enter to continue...")
+            main_menu()
+            return
+        
+        ollama_questions = [
+            inquirer.List(
+                "model",
+                message="Select Ollama model",
+                choices=ollama_models
+            ),
+            inquirer.Text(
+                "system_prompt",
+                message="Enter optional system prompt (leave empty if not needed)"
+            )
+        ]
+        
+        ollama_answers = inquirer.prompt(ollama_questions)
+        
+        model_config = {
+            "model": ollama_answers["model"],
+            "system_prompt": ollama_answers["system_prompt"] if ollama_answers["system_prompt"] else None,
+            "temperature": 0.7,
+            "max_tokens": 1000
+        }
+        
+        model_name = ollama_answers["model"]
+    else:
+        # Handle standard API-based models
+        models = available_models.get(provider_value, [])
+        
+        if not models:
+            console.print(f"[yellow]No models available for {provider_value}.[/yellow]")
+            console.print("Returning to main menu...")
+            input("\nPress Enter to continue...")
+            main_menu()
+            return
+        
+        model_questions = [
+            inquirer.List(
+                "model",
+                message=f"Select {provider_value} model",
+                choices=models
+            ),
+            inquirer.Text(
+                "system_prompt",
+                message="Enter optional system prompt (leave empty if not needed)"
+            )
+        ]
+        
+        model_answers = inquirer.prompt(model_questions)
+        
+        model_config = {
+            "provider": provider_value,
+            "model": model_answers["model"],
+            "system_prompt": model_answers["system_prompt"] if model_answers["system_prompt"] else None,
+            "temperature": 0.7,
+            "max_tokens": 1000,
+        }
+        
+        model_name = model_answers["model"]
+    
+    # Ask for chatbot context description
+    context_question = [
+        inquirer.Text(
+            "chatbot_context",
+            message="Enter a brief description of the chatbot/model (purpose, usage, development reasons)",
+            default="An AI assistant designed to be helpful, harmless, and honest."
+        )
+    ]
+    
+    context_answer = inquirer.prompt(context_question)
+    chatbot_context = context_answer["chatbot_context"]
+    
+    # Ask for HuggingFace model and API key
+    hf_questions = [
+        inquirer.Text(
+            "model_id",
+            message="Enter HuggingFace model ID for red-teaming (e.g., meta-llama/Llama-2-7b-chat-hf)",
+            default="meta-llama/Llama-2-7b-chat-hf"
+        ),
+        inquirer.Text(
+            "api_key",
+            message="Enter HuggingFace API key (leave empty if not needed)"
+        ),
+        inquirer.List(
+            "quant_mode",
+            message="Select quantization mode for the model",
+            choices=[
+                "Auto (best for your hardware)",
+                "8-bit (faster, more memory)",
+                "4-bit (slower, less memory)",
+                "CPU only (no GPU)"
+            ]
+        ),
+        inquirer.List(
+            "iterations",
+            message="Select number of conversation iterations",
+            choices=["5", "10", "20", "30"]
+        ),
+        inquirer.Confirm(
+            "verbose",
+            message="Enable verbose output?",
+            default=False
+        )
+    ]
+    
+    hf_answers = inquirer.prompt(hf_questions)
+    
+    redteam_model_id = hf_answers["model_id"]
+    hf_api_key = hf_answers["api_key"] if hf_answers["api_key"] else None
+    quant_mode = hf_answers["quant_mode"].split()[0].lower()  # Extract first word and lowercase
+    max_iterations = int(hf_answers["iterations"])
+    verbose = hf_answers["verbose"]
+    
+    # Set up the output directory
+    output_dir = "results/conversational"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Confirm before running
+    console.print("\n[bold]Conversational Red-Teaming Configuration:[/bold]")
+    console.print(f"Target: {provider_value.capitalize()} - {model_name}")
+    console.print(f"Red-Teaming Model: {redteam_model_id}")
+    console.print(f"Quantization Mode: {hf_answers['quant_mode']}")
+    console.print(f"Iterations: {max_iterations}")
+    console.print(f"Output Directory: {output_dir}")
+    console.print()
+    
+    confirm = inquirer.confirm("Ready to run the conversational red-teaming scan?", default=True)
+    
+    if confirm:
+        try:
+            console.print("\n[bold]Launching Conversational Red-Teaming Scanner...[/bold]")
+            
+            # Import the conversational red-teaming module
+            from redteamer.red_team.conversational_redteam import run_conversational_redteam
+            
+            # Run the red-teaming process
+            run_conversational_redteam(
+                target_model_type=provider_value,
+                chatbot_context=chatbot_context,
+                redteam_model_id=redteam_model_id,
+                model_config=model_config,
+                hf_api_key=hf_api_key,
+                max_iterations=max_iterations,
+                output_dir=output_dir,
+                verbose=verbose,
+                quant_mode=quant_mode
+            )
+            
+        except Exception as e:
+            console.print(f"\n[bold red]Error running conversational red-teaming:[/bold red] {str(e)}")
+        
+        input("\nPress Enter to continue...")
+    
+    # Return to main menu
     main_menu()
 
 def test_model_menu():

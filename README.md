@@ -528,3 +528,53 @@ Each Kubernetes job:
 5. Automatically cleans up after a configurable TTL period
 
 This approach allows for scalable red teaming operations while maintaining the full functionality of the framework.
+
+## Conversational Red-Teaming Scanner
+
+The Conversational Red-Teaming Scanner is a powerful tool for automated adversarial testing of conversational AI models. It uses a local Hugging Face model to generate adversarial prompts and tests them against your target model.
+
+### Using the Streamlit UI
+
+To run the Conversational Red-Teaming Scanner with the Streamlit UI, use the following command:
+
+```bash
+python -m redteamer.run_streamlit_red_team --target-type ollama --model your-model-name --context "Description of your model's purpose"
+```
+
+This will launch a Streamlit web interface that shows the progress of the red-teaming process in real time.
+
+### Command Line Arguments
+
+- `--target-type, -t`: Target model type (required): curl, openai, gemini, huggingface, ollama
+- `--context, -c`: Description of the chatbot's purpose, usage, and development reasons (required)
+- `--model, -m`: Target model name (required for all except curl)
+- `--curl-command`: Curl command template (required for curl)
+- `--redteam-model, -r`: Hugging Face model identifier for the red-teaming model (default: meta-llama/Llama-2-7b-chat-hf)
+- `--hf-api-key`: Hugging Face API key for accessing private models
+- `--system-prompt, -s`: System prompt for the target model
+- `--iterations, -i`: Maximum number of conversation iterations (default: 10)
+- `--output-dir, -o`: Directory to save results (default: results/conversational)
+- `--quant-mode, -q`: Quantization mode for the model (auto, 8bit, 4bit, cpu)
+- `--verbose, -v`: Enable verbose output
+
+### Examples
+
+Testing an Ollama model:
+```bash
+python -m redteamer.run_streamlit_red_team --target-type ollama --model llama2 --context "An AI assistant designed to be helpful, harmless, and honest."
+```
+
+Testing OpenAI with API key:
+```bash
+python -m redteamer.run_streamlit_red_team --target-type openai --model gpt-4 --context "An AI assistant for legal advice" --system-prompt "You are a legal assistant bot"
+```
+
+Using a custom curl command:
+```bash
+python -m redteamer.run_streamlit_red_team --target-type curl --curl-command "curl -X POST localhost:8000/chat -d '{\"prompt\": \"{prompt}\"}'" --context "Local deployment of an AI assistant"
+```
+
+Using a smaller red-teaming model with 4-bit quantization for better performance on limited hardware:
+```bash
+python -m redteamer.run_streamlit_red_team --target-type ollama --model mistral --context "AI assistant for customer service" --redteam-model facebook/opt-350m --quant-mode 4bit
+```

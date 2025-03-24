@@ -3193,5 +3193,152 @@ def menu():
     """
     run_interactive_menu()
 
+@redteam_app.command("conversational")
+def conversational_redteam(
+    target_model_type: str = typer.Option(..., "--target-type", "-t", 
+                                          help="Target model type (curl, openai, gemini, huggingface, ollama)"),
+    chatbot_context: str = typer.Option(None, "--context", "-c", 
+                                       help="Description of the chatbot's purpose, usage, and development reasons"),
+    redteam_model_id: str = typer.Option("meta-llama/Llama-2-7b-chat-hf", "--redteam-model", "-r", 
+                                         help="Hugging Face model identifier for the red-teaming model"),
+    hf_api_key: Optional[str] = typer.Option(None, "--hf-api-key", 
+                                            help="Hugging Face API key"),
+    model: Optional[str] = typer.Option(None, "--model", "-m", 
+                                       help="Target model name (not needed for curl)"),
+    system_prompt: Optional[str] = typer.Option(None, "--system", "-s", 
+                                              help="System prompt for the target model"),
+    curl_command: Optional[str] = typer.Option(None, "--curl-command", 
+                                             help="Curl command template with {prompt} and optional {system_prompt} placeholders"),
+    max_iterations: int = typer.Option(10, "--iterations", "-i", 
+                                      help="Maximum number of conversation iterations"),
+    output_dir: str = typer.Option("results/conversational", "--output", "-o", 
+                                  help="Directory to save results"),
+    interactive: bool = typer.Option(True, "--interactive/--non-interactive", 
+                                    help="Run in interactive mode"),
+    quant_mode: str = typer.Option("auto", "--quant-mode", "-q",
+                                  help="Quantization mode (auto, 8bit, 4bit, cpu)"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", 
+                                help="Verbose output")
+):
+    """
+    Run a conversational red-teaming evaluation against a target model.
+    
+    This command launches a red-teaming scenario where an adversarial LLM (loaded locally)
+    generates prompts to test a target model through iterative conversation.
+    """
+    if interactive:
+        from redteamer.interactive_menu import conversational_redteam_menu
+        conversational_redteam_menu()
+        return
+
+    try:
+        # Set up model configuration based on target model type
+        model_config = {}
+        
+        if target_model_type == "curl":
+            if not curl_command:
+                console.print("[bold red]Error:[/bold red] Curl command is required for curl target type")
+                raise typer.Exit(1)
+            
+            model_config = {
+                "curl_command": curl_command,
+                "system_prompt": system_prompt
+            }
+        elif target_model_type == "ollama":
+            if not model:
+                console.print("[bold red]Error:[/bold red] Model name is required for ollama target type")
+                raise typer.Exit(1)
+            
+            model_config = {
+                "model": model,
+                "system_prompt": system_prompt,
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+        else:
+            if not model:
+                console.print("[bold red]Error:[/bold red] Model name is required")
+                raise typer.Exit(1)
+            
+            model_config = {
+                "provider": target_model_type,
+                "model": model,
+                "system_prompt": system_prompt,
+                "temperature": 0.7,
+                "max_tokens": 1000
+            }
+        
+        # Get or prompt for chatbot context
+        if not chatbot_context and not interactive:
+            console.print("[bold red]Error:[/bold red] Chatbot context is required in non-interactive mode")
+            raise typer.Exit(1)
+        elif not chatbot_context:
+            chatbot_context = Prompt.ask(
+                "[bold]Enter a brief description of the chatbot/model[/bold] (purpose, usage, development reasons)",
+                default="An AI assistant designed to be helpful, harmless, and honest."
+            )
+        
+        # Import the conversational red-teaming module
+        from redteamer.red_team.conversational_redteam import run_conversational_redteam
+        
+        # Run the conversational red-teaming process
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Running conversational red-teaming...", total=1)
+            
+            try:
+                results = run_conversational_redteam(
+                    target_model_type=target_model_type,
+                    chatbot_context=chatbot_context,
+                    redteam_model_id=redteam_model_id,
+                    model_config=model_config,
+                    hf_api_key=hf_api_key,
+                    max_iterations=max_iterations,
+                    output_dir=output_dir,
+                    verbose=verbose,
+                    quant_mode=quant_mode
+                )
+                
+                progress.update(task, completed=1)
+                
+                # Show summary of results
+                console.print("\n[bold green]Conversational Red-Teaming Completed![/bold green]")
+                
+                if results and "summary" in results:
+                    summary = results["summary"]
+                    
+                    table = Table(title="Conversational Red-Teaming Results")
+                    table.add_column("Metric", style="cyan")
+                    table.add_column("Value", style="green")
+                    
+                    table.add_row("Total Iterations", str(summary.get("total_iterations", 0)))
+                    table.add_row("Total Vulnerabilities", str(summary.get("total_vulnerabilities", 0)))
+                    table.add_row("Vulnerability Rate", f"{summary.get('vulnerability_rate', 0):.1%}")
+                    
+                    classifications = summary.get("classifications", {})
+                    table.add_row("Appropriate Refusals", str(classifications.get("appropriate_refusal", 0)))
+                    table.add_row("Partial Compliance", str(classifications.get("partial_compliance", 0)))
+                    table.add_row("Full Compliance", str(classifications.get("full_compliance", 0)))
+                    
+                    console.print(table)
+                    
+                    # Show output file
+                    if "output_file" in results:
+                        console.print(f"\nResults saved to: [bold]{results['output_file']}[/bold]")
+                
+            except Exception as e:
+                progress.update(task, visible=False)
+                console.print(f"[bold red]Error running conversational red-teaming:[/bold red] {str(e)}")
+                if verbose:
+                    import traceback
+                    console.print(traceback.format_exc())
+                raise typer.Exit(1)
+    
+    except Exception as e:
+        console.print(f"[bold red]Error:[/bold red] {str(e)}")
+        if verbose:
+            import traceback
+            console.print(traceback.format_exc())
+        raise typer.Exit(1)
+
 if __name__ == "__main__":
     app() 
