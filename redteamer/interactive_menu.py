@@ -93,12 +93,9 @@ def main_menu():
             "action",
             message="What would you like to do?",
             choices=[
-                "Run a Static Scan",
-                "Run Interactive Red Team Evaluation",
-                "Test a Model",
-                "Manage Datasets",
-                "Generate Reports",
-                "View Documentation",
+                "Raw Scan (Static Scan)",
+                "Conversation Scan (Chatbot Scan)",
+                "View Scan Results",
                 "Exit"
             ]
         )
@@ -106,18 +103,12 @@ def main_menu():
     
     answers = inquirer.prompt(questions)
     
-    if answers["action"] == "Run a Static Scan":
+    if answers["action"] == "Raw Scan (Static Scan)":
         static_scan_menu()
-    elif answers["action"] == "Run Interactive Red Team Evaluation":
+    elif answers["action"] == "Conversation Scan (Chatbot Scan)":
         interactive_redteam_menu()
-    elif answers["action"] == "Test a Model":
-        test_model_menu()
-    elif answers["action"] == "Manage Datasets":
-        dataset_menu()
-    elif answers["action"] == "Generate Reports":
+    elif answers["action"] == "View Scan Results":
         report_menu()
-    elif answers["action"] == "View Documentation":
-        view_documentation()
     elif answers["action"] == "Exit":
         console.print("[bold green]Thank you for using the Red Teaming Framework![/bold green]")
         sys.exit(0)
@@ -127,13 +118,6 @@ def static_scan_menu():
     print_header()
     console.print("[bold]Static Scan[/bold]")
     console.print("Run a quick scan with minimal interaction\n")
-    
-    # Get available datasets
-    datasets = get_available_datasets()
-    if not datasets:
-        datasets = ["Create new dataset"]
-    else:
-        datasets.append("Create new dataset")
     
     # Get available models by provider
     available_models = get_all_available_models()
@@ -164,7 +148,8 @@ def static_scan_menu():
         # Ask if user wants to use a custom model
         use_custom = inquirer.confirm("Would you like to use a custom model?", default=True)
         if use_custom:
-            return run_custom_model_scan(datasets)
+            run_custom_model_scan()
+            return
         else:
             console.print("\n[yellow]Please set up API keys or ensure Ollama is running with models available.[/yellow]")
             console.print("Returning to main menu...")
@@ -172,21 +157,26 @@ def static_scan_menu():
             main_menu()
             return
     
+    # Initialize prompt engine
+    from redteamer.prompt_engine import PromptEngine
+    prompt_engine = PromptEngine()
+    intensity_levels = prompt_engine.get_intensity_levels()
+    
+    # Create intensity level choices
+    intensity_choices = []
+    for level, config in intensity_levels.items():
+        intensity_choices.append(f"Level {level} - {config['prompts']} prompts using {len(config['techniques'])} techniques")
+    
     questions = [
-        inquirer.List(
-            "dataset",
-            message="Select a dataset",
-            choices=datasets
-        ),
         inquirer.List(
             "model",
             message="Select a model",
             choices=model_choices
         ),
-        inquirer.Text(
-            "sample_size",
-            message="Number of vectors to sample",
-            default="10"
+        inquirer.List(
+            "intensity",
+            message="Select scan intensity level",
+            choices=intensity_choices
         ),
         inquirer.Confirm(
             "verbose",
@@ -197,45 +187,70 @@ def static_scan_menu():
     
     answers = inquirer.prompt(questions)
     
-    # Handle dataset creation if needed
-    dataset_path = answers["dataset"]
-    if dataset_path == "Create new dataset":
-        # Here you'd call a function to create a new dataset
-        console.print("[yellow]Dataset creation not implemented in this demo[/yellow]")
-        dataset_path = "examples/sample_attack_vectors.json"
-    
     # Handle custom model if selected
     if answers["model"] == "Use custom model":
-        return run_custom_model_scan(datasets, dataset_path, answers["sample_size"], answers["verbose"])
-    else:
-        # Parse provider and model
-        provider, model = answers["model"].split(":")
-        
-        # Build the command
-        cmd = ["python", "-m", "redteamer.cli", "static_scan",
-               "--provider", provider,
-               "--model", model,
-               "--dataset", dataset_path,
-               "--sample-size", answers["sample_size"]]
+        run_custom_model_scan()
+        return
     
-        # Add verbose flag if selected
-        if answers["verbose"]:
-            cmd.append("--verbose")
-        
-        # Run the command
-        console.print(f"\n[bold]Running command:[/bold] {' '.join(cmd)}\n")
-        
-        # Confirm before running
-        confirm = inquirer.confirm("Ready to run the scan?", default=True)
-        if confirm:
-            try:
-                subprocess.run(cmd)
-            except Exception as e:
-                console.print(f"[bold red]Error running command:[/bold red] {str(e)}")
-        
-        # Wait for user to press enter before returning to main menu
-        input("\nPress Enter to return to the main menu...")
+    # Parse provider and model with error handling
+    try:
+        model_parts = answers["model"].split(":")
+        if len(model_parts) != 2:
+            console.print("[red]Invalid model format. Expected 'provider:model'[/red]")
+            input("\nPress Enter to continue...")
+            main_menu()
+            return
+        provider, model = model_parts
+    except Exception as e:
+        console.print(f"[red]Error parsing model: {str(e)}[/red]")
+        input("\nPress Enter to continue...")
         main_menu()
+        return
+    
+    # Parse intensity level
+    intensity_level = int(answers["intensity"].split()[1])
+    
+    # Generate prompts based on intensity level
+    console.print(f"\n[bold]Generating {intensity_levels[intensity_level]['prompts']} prompts...[/bold]")
+    prompts = prompt_engine.generate_prompts(intensity_level)
+    
+    # Save prompts to a temporary file
+    import tempfile
+    import json
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        json.dump({"prompts": prompts}, f)
+        temp_prompt_file = f.name
+    
+    # Build the command
+    cmd = ["python", "-m", "redteamer.cli", "static_scan",
+           "--provider", provider,
+           "--model", model,
+           "--prompts-file", temp_prompt_file]
+
+    # Add verbose flag if selected
+    if answers["verbose"]:
+        cmd.append("--verbose")
+    
+    # Run the command
+    console.print(f"\n[bold]Running command:[/bold] {' '.join(cmd)}\n")
+    
+    # Confirm before running
+    confirm = inquirer.confirm("Ready to run the scan?", default=True)
+    if confirm:
+        try:
+            subprocess.run(cmd)
+        except Exception as e:
+            console.print(f"[bold red]Error running command:[/bold red] {str(e)}")
+        finally:
+            # Clean up temporary file
+            try:
+                os.unlink(temp_prompt_file)
+            except:
+                pass
+    
+    # Wait for user to press enter before returning to main menu
+    input("\nPress Enter to return to the main menu...")
+    main_menu()
 
 def run_custom_model_scan(datasets, dataset_path=None, sample_size="10", verbose=False):
     """Run a scan with a custom model."""
