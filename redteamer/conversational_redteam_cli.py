@@ -43,6 +43,10 @@ def main():
     parser.add_argument("--max-iterations", type=int, default=10, help="Maximum number of conversation iterations")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("--curl-command", help="Custom curl command for target model")
+    parser.add_argument("--device", choices=["cpu", "gpu"], default="gpu", 
+                      help="Device to run the model on: 'cpu' (slower but works everywhere) or 'gpu' (faster but requires compatible hardware)")
+    parser.add_argument("--fallback-mode", action="store_true", 
+                      help="Use template-based generation only, without attempting to load any models (useful when dependencies have issues)")
     
     args = parser.parse_args()
     
@@ -69,6 +73,8 @@ async def run_conversational_redteam_cli(args):
     Args:
         args: Command line arguments
     """
+    console = Console()
+    
     console.print("[bold blue]Conversational LLM Red Teaming[/bold blue]")
     console.print("Running evaluation in CLI mode\n")
     
@@ -96,165 +102,127 @@ async def run_conversational_redteam_cli(args):
         if args.verbose:
             console.print(f"[dim]Command: {args.curl_command}[/dim]")
     else:
-        console.print(f"[bold]Target:[/bold] {args.target_type}/{args.model}")
+        console.print(f"[bold]Target:[/bold] {args.target_type}")
     
     console.print(f"[bold]Context:[/bold] {args.chatbot_context}")
     
-    if args.system_prompt:
+    if hasattr(args, 'system_prompt') and args.system_prompt:
         console.print(f"[bold]System prompt:[/bold] {args.system_prompt}")
     
-    if args.redteam_model_id:
+    if hasattr(args, 'redteam_model_id') and args.redteam_model_id:
         console.print(f"[bold]Red team model:[/bold] {args.redteam_model_id}")
+    elif hasattr(args, 'model') and args.model:
+        console.print(f"[bold]Red team model:[/bold] {args.model}")
     else:
         console.print("[bold]Red team model:[/bold] (using default)")
     
     console.print(f"[bold]Maximum iterations:[/bold] {args.max_iterations}")
     console.print()
     
-    # Prepare model configuration
+    # Show device selection
+    if hasattr(args, 'device'):
+        if args.device == "cpu":
+            console.print(f"[bold]Device:[/bold] CPU (optimized for compatibility)")
+        else:
+            console.print(f"[bold]Device:[/bold] GPU (optimized for speed)")
+    
+    # Show fallback mode information
+    if hasattr(args, 'fallback_mode') and args.fallback_mode:
+        console.print("[bold yellow]Running in fallback mode - using templated prompts only[/bold yellow]")
+        console.print("This mode bypasses model loading entirely and uses pre-defined adversarial prompt templates.")
+    console.print()
+    
+    # Create model configuration
     model_config = create_model_config(args)
     
     # Create the conversational red team instance
     console.print("[bold]Initializing conversational red teaming...[/bold]")
     redteam = ConversationalRedTeam(
-        logging_level="DEBUG" if args.verbose else "INFO",
+        target_model_type=args.target_type,
         chatbot_context=args.chatbot_context,
-        redteam_model_id=args.redteam_model_id,
-        max_iterations=args.max_iterations
+        redteam_model_id=getattr(args, 'redteam_model_id', getattr(args, 'model', None)),
+        max_iterations=args.max_iterations,
+        verbose=args.verbose,
+        quant_mode="cpu" if getattr(args, 'device', '') == "cpu" else "auto",
+        fallback_mode=getattr(args, 'fallback_mode', False),
+        device=getattr(args, 'device', 'gpu'),
+        curl_command=getattr(args, 'curl_command', None)
     )
     
-    # Register CLI callbacks for progress updates
-    register_cli_callbacks(redteam)
+    # Force template mode if fallback mode is enabled
+    if getattr(args, 'fallback_mode', False):
+        redteam.using_templates = True
+        redteam.using_fallback = True
+        console.print("[yellow]Using pre-defined templates for adversarial prompts - no model loading required[/yellow]")
     
-    # Run the conversational red teaming
-    console.print("\n[bold]Starting conversational red teaming...[/bold]")
-    console.print("[italic]This will test how the model responds to adversarial prompts in a conversation.[/italic]\n")
+    # Register CLI callbacks for progress updates
+    def cli_progress_callback(iteration, total, exchange, vulnerabilities_count=0):
+        """CLI callback for progress updates"""
+        found_vulnerability = exchange.get('found_vulnerability', False)
+        severity = exchange.get('severity', 'none')
+        
+        if found_vulnerability:
+            console.print(f"\n[bold red]Found potential vulnerability in iteration {iteration}![/bold red]")
+            console.print(f"Severity: {severity.upper()}")
+            console.print(f"Type: {exchange.get('vulnerability_type', 'Unknown')}")
+            console.print(f"Total vulnerabilities found: {vulnerabilities_count}")
+        else:
+            console.print(f"\nIteration {iteration}/{total} completed.")
+            
+        console.print(f"\n[bold green]User/Adversarial Prompt:[/bold green]")
+        console.print(exchange.get('prompt', 'No prompt'))
+        
+        console.print(f"\n[bold blue]Target Model Response:[/bold blue]")
+        console.print(exchange.get('response', 'No response'))
+        
+        console.print("\n" + "-" * 80 + "\n")
     
     try:
         # Run the red team conversation
-        results = await redteam.run_redteam_conversation(model_config)
+        results = await redteam.run_redteam_conversation(model_config, cli_progress_callback)
         
         # Save results
         results_path = os.path.join("chatbot_evals", f"redteam_conversation_{timestamp}.json")
         with open(results_path, 'w') as f:
             json.dump(results, f, indent=2)
+            
+        # Print summary
+        console.print("\n[bold]Red Teaming Complete![/bold]")
+        console.print(f"Ran {results.get('num_iterations', 0)} iterations")
         
-        # Display summary
-        display_conversation_summary(results)
-        
-        console.print(f"\n[bold green]✓ Conversational red teaming completed![/bold green]")
-        console.print(f"[bold]Results saved to:[/bold] {results_path}")
-        console.print("[dim]Use the 'results viewer' to analyze these results in detail.[/dim]")
+        vulnerabilities = results.get('vulnerabilities', [])
+        if vulnerabilities:
+            console.print(f"[bold red]Found {len(vulnerabilities)} potential vulnerabilities![/bold red]")
+            for idx, vuln in enumerate(vulnerabilities):
+                console.print(f"\n[bold]Vulnerability {idx+1}:[/bold]")
+                console.print(f"Type: {vuln.get('vulnerability_type', 'Unknown')}")
+                console.print(f"Severity: {vuln.get('severity', 'unknown').upper()}")
+                console.print(f"Prompt: {vuln.get('prompt', 'No prompt')[:200]}...")
+                console.print(f"Response: {vuln.get('response', 'No response')[:200]}...")
+        else:
+            console.print("[bold green]No vulnerabilities detected.[/bold green]")
+            
+        console.print(f"\nResults saved to: {results_path}")
         
     except Exception as e:
-        console.print(f"[bold red]Error during conversational red teaming:[/bold red] {str(e)}")
-        if args.verbose:
-            import traceback
-            console.print(traceback.format_exc())
+        console.print(f"[bold red]Error during red teaming:[/bold red] {str(e)}")
+        import traceback
+        console.print(traceback.format_exc())
 
 def create_model_config(args) -> Dict[str, Any]:
-    """Create model configuration from arguments."""
-    if args.curl_command:
-        # Custom model
-        return {
-            "provider": "custom",
-            "model_id": "custom-model",
-            "curl_command": args.curl_command
-        }
+    """Create model configuration dictionary from args."""
+    model_config = {}
+    model_config['model'] = args.target_type
+    
+    if hasattr(args, 'system_prompt') and args.system_prompt:
+        model_config['system'] = args.system_prompt
     else:
-        # Standard provider model
-        config = {
-            "provider": args.target_type,
-            "model_id": args.model,
-            "parameters": {
-                "temperature": 0.7,
-                "max_tokens": 1000
-            }
-        }
+        model_config['system'] = ""
         
-        # Add system prompt if provided
-        if args.system_prompt:
-            config["system_prompt"] = args.system_prompt
-        
-        return config
-
-def register_cli_callbacks(redteam):
-    """Register callbacks for CLI progress updates."""
+    if hasattr(args, 'curl_command') and args.curl_command:
+        model_config['curl_command'] = args.curl_command
     
-    # Callback for new iteration
-    def on_iteration_start(iteration: int, max_iterations: int, prompt: str):
-        console.print(f"\n[bold][Iteration {iteration}/{max_iterations}][/bold]")
-        console.print(Panel(prompt, title="Red Team Prompt", border_style="red"))
-    
-    # Callback for model response
-    def on_model_response(response: str):
-        console.print(Panel(response, title="Model Response", border_style="blue"))
-    
-    # Callback for evaluation
-    def on_evaluation(evaluation_result: Dict[str, Any]):
-        success = evaluation_result.get("success", False)
-        color = "red" if success else "green"
-        icon = "✗" if success else "✓"
-        
-        console.print(f"[bold][Evaluation][/bold] [{color}]{icon} {'Prompt succeeded' if success else 'Model resisted attack'}[/{color}]")
-        
-        if "explanation" in evaluation_result:
-            console.print(f"[dim]{evaluation_result['explanation']}[/dim]")
-        
-        if "matched_patterns" in evaluation_result:
-            patterns = evaluation_result["matched_patterns"]
-            if patterns:
-                console.print("[bold]Matched patterns:[/bold]")
-                for pattern in patterns:
-                    console.print(f"- {pattern}")
-    
-    # Callback for error
-    def on_error(error_message: str):
-        console.print(f"[bold red]Error:[/bold red] {error_message}")
-    
-    # Register callbacks
-    redteam.set_callback("iteration_start", on_iteration_start)
-    redteam.set_callback("model_response", on_model_response)
-    redteam.set_callback("evaluation", on_evaluation)
-    redteam.set_callback("error", on_error)
-
-def display_conversation_summary(results: Dict[str, Any]):
-    """Display a summary of the conversational red teaming results."""
-    console.print("\n[bold]Conversational Red Team Results Summary[/bold]")
-    
-    # Extract metrics
-    total_iterations = results.get("total_iterations", 0)
-    successful_iterations = sum(1 for turn in results.get("conversation", [])
-                              if turn.get("evaluation", {}).get("success", False))
-    vulnerability_rate = 0
-    
-    if total_iterations > 0:
-        vulnerability_rate = (successful_iterations / total_iterations) * 100
-    
-    # Get model info
-    model_info = results.get("model_info", {})
-    model_name = f"{model_info.get('provider', 'unknown')}/{model_info.get('model_id', 'unknown')}"
-    
-    # Display summary
-    console.print(f"[bold]Model tested:[/bold] {model_name}")
-    console.print(f"[bold]Total conversation turns:[/bold] {total_iterations}")
-    console.print(f"[bold]Successful attacks:[/bold] {successful_iterations}")
-    console.print(f"[bold]Vulnerability rate:[/bold] {vulnerability_rate:.2f}%")
-    
-    # Display techniques that worked
-    if "conversation" in results:
-        attack_types = {}
-        for turn in results["conversation"]:
-            evaluation = turn.get("evaluation", {})
-            if evaluation.get("success", False):
-                attack_type = turn.get("metadata", {}).get("technique", "unknown")
-                attack_types[attack_type] = attack_types.get(attack_type, 0) + 1
-        
-        if attack_types:
-            console.print("\n[bold]Successful attack techniques:[/bold]")
-            sorted_types = sorted(attack_types.items(), key=lambda x: x[1], reverse=True)
-            for attack_type, count in sorted_types:
-                console.print(f"- {attack_type}: {count} successful attacks")
+    return model_config
 
 if __name__ == "__main__":
     main() 

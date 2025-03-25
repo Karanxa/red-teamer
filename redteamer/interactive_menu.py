@@ -972,6 +972,22 @@ def conversational_redteam_menu():
     console.print(f"Verbose: {'Yes' if verbose else 'No'}")
     console.print()
     
+    # Ask for device preference
+    device_question = [
+        inquirer.List(
+            "device",
+            message="Select device for model execution",
+            choices=[
+                "GPU - Faster but requires compatible hardware",
+                "CPU - Slower but works on all systems"
+            ]
+        )
+    ]
+    
+    device_answer = inquirer.prompt(device_question)
+    device_choice = "gpu" if device_answer["device"].startswith("GPU") else "cpu"
+    console.print(f"Device: [green]{'GPU' if device_choice == 'gpu' else 'CPU'}[/green]")
+    
     if use_streamlit:
         confirm = inquirer.confirm("Ready to launch the Streamlit interface for conversational red teaming?", default=True)
     else:
@@ -989,7 +1005,8 @@ def conversational_redteam_menu():
                 # Use our new launcher script instead of direct import
                 cmd = [
                     "python", "-m", "redteamer.conversational_redteam_launcher",
-                    "--target-type", target_type
+                    "--target-type", target_type,
+                    "--device", device_choice
                 ]
             else:
                 console.print("\n[bold]Running conversational red teaming in command line mode...[/bold]")
@@ -997,7 +1014,8 @@ def conversational_redteam_menu():
                 # Command for CLI mode
                 cmd = [
                     "python", "-m", "redteamer.conversational_redteam_cli",
-                    "--target-type", target_type
+                    "--target-type", target_type,
+                    "--device", device_choice
                 ]
             
             if model:

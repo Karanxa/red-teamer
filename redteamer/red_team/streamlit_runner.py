@@ -154,21 +154,133 @@ async def run_conversational_redteam_with_ui(args):
     # Create the conversational red-teaming engine
     display_model_loading_status("Loading the red-teaming model...")
     
-    redteam = ConversationalRedTeam(
-        target_model_type=args.target_type,
-        chatbot_context=args.chatbot_context,
-        redteam_model_id=args.redteam_model_id,
-        hf_api_key=args.hf_api_key,
-        output_dir=args.output_dir,
-        max_iterations=args.max_iterations,
-        verbose=args.verbose,
-        quant_mode=args.quant_mode
-    )
+    # Display if fallback mode is enabled
+    if hasattr(args, 'fallback_mode') and args.fallback_mode:
+        st.warning("⚠️ **FALLBACK MODE ENABLED**: Using template-based generation only. No models will be loaded.", icon="⚠️")
+        st.info("This mode bypasses all model loading issues by using predefined templates for adversarial prompts.")
+    
+    # Display device information
+    if hasattr(args, 'device'):
+        if args.device == "cpu":
+            st.info(f"🖥️ Running in CPU-only mode. Model loading may take longer.", icon="🖥️")
+        else:
+            st.info(f"🖥️ Device set to: {args.device.upper()}", icon="🖥️")
+    
+    # Display HuggingFace API key status
+    if hasattr(args, 'hf_api_key') and args.hf_api_key:
+        st.success("🔑 HuggingFace API key provided - can access gated models", icon="🔑")
+    
+    def display_model_loading_status(message):
+        """Display a loading status message in the Streamlit UI."""
+        if not hasattr(run_conversational_redteam_with_ui, 'status_placeholder'):
+            run_conversational_redteam_with_ui.status_placeholder = st.empty()
+        
+        run_conversational_redteam_with_ui.status_placeholder.info(f"🔄 {message}", icon="🔄")
+    
+    # Ensure we have a valid model ID if not using fallback mode
+    if not hasattr(args, 'fallback_mode') or not args.fallback_mode:
+        if not hasattr(args, 'redteam_model_id') or not args.redteam_model_id:
+            # Set a default model ID that's small enough to work on most systems
+            default_model = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+            display_model_loading_status(f"No model specified, using default model: {default_model}")
+            args.redteam_model_id = default_model
+    
+    # Update UI with the selected model info
+    if hasattr(args, 'redteam_model_id') and args.redteam_model_id:
+        st.info(f"🤖 Model: {args.redteam_model_id}")
     
     try:
+        # Create the red teaming object with validated model ID
+        display_model_loading_status("Initializing red teaming framework...")
+        redteam = ConversationalRedTeam(
+            target_model_type=args.target_type,
+            chatbot_context=args.chatbot_context,
+            redteam_model_id=args.redteam_model_id,
+            hf_api_key=getattr(args, 'hf_api_key', None),
+            output_dir=args.output_dir,
+            max_iterations=args.max_iterations,
+            verbose=args.verbose,
+            quant_mode=args.quant_mode,
+            fallback_mode=args.fallback_mode,
+            device=args.device
+        )
+        
         # Load the model
         display_model_loading_status("Loading red-teaming model...")
-        redteam._load_local_model()
+        
+        # Check if fallback mode is enabled
+        if hasattr(args, 'fallback_mode') and args.fallback_mode:
+            display_model_loading_status("Fallback mode enabled - skipping model loading")
+            redteam.using_templates = True
+            redteam.using_fallback = True
+            redteam.redteam_model = None
+            redteam.redteam_tokenizer = None
+        else:
+            # Show device information
+            if hasattr(args, 'device') and args.device == "cpu":
+                display_model_loading_status(f"Loading model in CPU-only mode... (this may take longer)")
+            elif hasattr(args, 'quant_mode') and args.quant_mode == "cpu":
+                display_model_loading_status(f"Loading model in CPU-only mode... (this may take longer)")
+                
+            # Try to load the model
+            try:
+                if hasattr(args, 'device') and args.device == "cpu":
+                    # Use CPU-specific loading
+                    display_model_loading_status("Using CPU-specific loading method...")
+                    if redteam._load_direct_cpu():
+                        display_model_loading_status("✅ Model loaded successfully with CPU-specific method")
+                    else:
+                        display_model_loading_status("❌ CPU-specific loading failed, trying standard loading...")
+                        if redteam._load_local_model():
+                            display_model_loading_status("✅ Model loaded successfully with standard method")
+                        else:
+                            display_model_loading_status("❌ All model loading attempts failed")
+                            display_model_loading_status("Falling back to template-based generation")
+                            redteam.using_templates = True
+                else:
+                    # Use standard loading with auto device map
+                    display_model_loading_status("Using standard loading method with auto device mapping...")
+                    if redteam._load_local_model():
+                        display_model_loading_status("✅ Model loaded successfully")
+                    else:
+                        display_model_loading_status("❌ Standard loading failed, trying CPU-specific method...")
+                        if redteam._load_direct_cpu():
+                            display_model_loading_status("✅ Model loaded with CPU-specific method")
+                        else:
+                            display_model_loading_status("❌ All model loading attempts failed")
+                            display_model_loading_status("Falling back to template-based generation")
+                            redteam.using_templates = True
+                
+                # Check model loading status one more time
+                if not redteam.check_model_loaded() and not redteam.using_templates and not redteam.using_fallback:
+                    # If still not loaded, force template mode
+                    display_model_loading_status("⚠️ Model did not load properly. Forcing template mode.")
+                    redteam.using_templates = True
+                
+                # Display final model status
+                model_status = redteam.get_model_status()
+                display_model_loading_status(f"Final status: {model_status}")
+                
+            except ImportError as import_error:
+                # Special handling for import errors
+                error_message = str(import_error)
+                display_model_loading_status(f"❌ Import error: {error_message}")
+                
+                if "huggingface_hub" in error_message and "split_torch_state_dict_into_shards" in error_message:
+                    display_model_loading_status("⚠️ This is a known issue with huggingface_hub package version.")
+                    display_model_loading_status("Try updating it with: pip install --upgrade huggingface_hub>=0.21.0")
+                elif "bitsandbytes" in error_message:
+                    display_model_loading_status("⚠️ BitsAndBytes library not installed. Install with: pip install bitsandbytes")
+                elif "transformers" in error_message:
+                    display_model_loading_status("⚠️ Transformers library issue. Install with: pip install --upgrade transformers")
+                
+                display_model_loading_status("Falling back to template-based generation")
+                redteam.using_templates = True
+                
+            except Exception as model_error:
+                display_model_loading_status(f"❌ Error loading model: {str(model_error)}")
+                display_model_loading_status("Falling back to template-based generation")
+                redteam.using_templates = True
         
         # Update configuration display to show fallback status if needed
         display_config(
@@ -215,19 +327,24 @@ async def run_conversational_redteam_with_ui(args):
         st.error(f"Error during red-teaming process: {str(e)}")
         raise e
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Conversational Red-Teaming Scanner with Streamlit UI")
-    parser.add_argument("--target-type", required=True, help="Target model type")
-    parser.add_argument("--model", help="Model name")
-    parser.add_argument("--curl-command", help="Curl command template")
-    parser.add_argument("--system-prompt", help="System prompt")
-    parser.add_argument("--chatbot-context", required=True, help="Chatbot context")
-    parser.add_argument("--redteam-model-id", required=True, help="Red-teaming model ID")
-    parser.add_argument("--hf-api-key", help="HuggingFace API key")
-    parser.add_argument("--max-iterations", type=int, default=10, help="Maximum iterations")
-    parser.add_argument("--output-dir", default="results/conversational", help="Output directory")
+def main():
+    """Run the conversational red teamer tool."""
+    parser = argparse.ArgumentParser(description="Red Teaming Tool with UI")
+    parser.add_argument("--target-type", default="ollama", help="Target model type")
+    parser.add_argument("--model", default="llama3", help="Model name")
+    parser.add_argument("--system-prompt", help="System prompt for the target model")
+    parser.add_argument("--chatbot-context", default="You are a helpful AI assistant.", help="Description of the chatbot being tested")
+    parser.add_argument("--redteam-model-id", help="Model ID for red teaming")
+    parser.add_argument("--max-iterations", type=int, default=10, help="Maximum number of iterations")
+    parser.add_argument("--output-dir", default="results", help="Directory to save results")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--quant-mode", default="auto", help="Quantization mode")
+    parser.add_argument("--fallback-mode", action="store_true", help="Enable fallback mode")
+    parser.add_argument("--device", default="gpu", help="Device to run the model on")
+    parser.add_argument("--hf-api-key", help="HuggingFace API key for accessing gated models")
     
     args = parser.parse_args()
-    asyncio.run(run_conversational_redteam_with_ui(args)) 
+    asyncio.run(run_conversational_redteam_with_ui(args))
+
+if __name__ == "__main__":
+    main() 
