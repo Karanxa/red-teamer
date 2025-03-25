@@ -276,7 +276,11 @@ def render_dashboard():
                 
                 # Display the response (target model message)
                 st.markdown("🤖 **Target Model Response:**")
-                st.markdown(f"```\n{result.get('response', 'N/A')}\n```")
+                # Extract just the response content if it's a dictionary
+                response = result.get('response', 'N/A')
+                if isinstance(response, dict) and "response" in response:
+                    response = response["response"]
+                st.markdown(f"```\n{response}\n```")
                 
                 # Display the evaluation
                 status = "✅ Attack Successful" if result.get('successful', False) else "❌ Attack Failed"

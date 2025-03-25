@@ -13,13 +13,13 @@ import asyncio
 import threading
 import argparse
 from typing import Dict, List, Optional, Any, Callable
+import streamlit as st
 
 # Import only when the file is run directly through Streamlit
 # Do not import at module level to avoid warnings
 def get_streamlit():
     """Get the streamlit module only when needed in the Streamlit context."""
     try:
-        import streamlit as st
         return st
     except (ImportError, RuntimeError):
         print("Streamlit not available or not running in a Streamlit context")
@@ -48,7 +48,7 @@ def main():
     from redteamer.red_team.conversational_redteam import ConversationalRedTeam
     
     # Initialize the app
-    initialize_streamlit_app(st)
+    initialize_streamlit_app()
     
     # Run the conversational red-teaming process
     run_conversational_redteam_with_ui(args, st)
@@ -160,58 +160,137 @@ def check_required_args(args):
         """)
         st.stop()
 
-def initialize_streamlit_app(st):
-    """
-    Initialize the Streamlit app with basic configuration.
-    
-    Args:
-        st: Streamlit module
-    """
+def initialize_streamlit_app():
+    """Initialize the Streamlit app with basic configuration."""
     st.set_page_config(
-        page_title="Conversational Red-Teaming Scanner",
-        page_icon="🔍",
-        layout="wide",
+        page_title="Red-Teaming Scanner",
+        page_icon="🎯",
+        layout="wide"
     )
     
-    st.title("Conversational Red-Teaming Scanner")
-    st.markdown("""
-    This tool automatically tests conversational AI models with adversarial prompts.
-    The red-teaming model generates prompts iteratively based on the model's responses.
-    """)
+    st.title("🎯 Conversational Red-Teaming Scanner")
+    st.markdown("---")
 
-def display_config(st, args):
-    """
-    Display the configuration settings.
-    
-    Args:
-        st: Streamlit module
-        args: Command line arguments
-    """
+def display_config(target_model_type: str, chatbot_context: str, redteam_model_id: str, max_iterations: int, using_fallback: bool = False, using_templates: bool = False):
+    """Display the current configuration."""
     with st.expander("Configuration", expanded=True):
-        col1, col2 = st.columns(2)
+        # Show template mode warning if applicable
+        if using_templates:
+            st.warning("⚠️ Unable to load any models. Using template-based prompt generation as a fallback.")
+        # Show fallback model warning if applicable
+        elif using_fallback:
+            st.warning(f"⚠️ Using fallback model ({redteam_model_id}) because the requested model could not be loaded.")
         
-        with col1:
-            st.markdown("**Target Model Type**")
-            st.code(args.target_type)
-            
-            st.markdown("**Target Model**")
-            if args.target_type == "curl":
-                st.code("Custom curl command")
-            else:
-                st.code(args.model)
-            
-            st.markdown("**Red-Teaming Model**")
-            st.code(args.redteam_model)
+        st.markdown(f"""
+        ### Target Configuration
+        - **Model Type:** {target_model_type.capitalize()}
+        - **Context:** {chatbot_context}
         
-        with col2:
-            st.markdown("**Max Iterations**")
-            st.code(str(args.iterations))
-            
-            st.markdown("**Quantization Mode**")
-            st.code(args.quant_mode)
-            
-            st.markdown("**Chatbot Context**")
-            st.text_area("", value=args.context, height=100, disabled=True)
+        ### Red-Teaming Configuration
+        - **Model:** {redteam_model_id}
+        - **Max Iterations:** {max_iterations}
+        """)
+
+def display_model_loading_status(message: str):
+    """Display model loading status."""
+    if 'model_status' not in st.session_state:
+        st.session_state.model_status = st.empty()
+    
+    st.session_state.model_status.info(message)
+
+def display_conversation(conversation: List[Dict[str, Any]]):
+    """Display the conversation history."""
+    with st.session_state.conversation_container:
+        st.subheader("Conversation History")
+        for entry in conversation:
+            with st.expander(f"Iteration {entry['iteration']}", expanded=True):
+                st.markdown("#### 🤖 Red Team Prompt")
+                st.markdown(entry["prompt"])
+                st.markdown("#### 🎯 Target Response")
+                # Extract just the response content if it's a dictionary
+                response = entry.get("response", "")
+                if isinstance(response, dict) and "response" in response:
+                    response = response["response"]
+                st.markdown(response)
+                st.markdown("#### 📊 Analysis")
+                st.json(entry["analysis"])
+
+def display_vulnerabilities(vulnerabilities: List[Dict[str, Any]]):
+    """Display discovered vulnerabilities."""
+    with st.session_state.vuln_container:
+        st.subheader("Discovered Vulnerabilities")
+        if vulnerabilities:
+            for i, vuln in enumerate(vulnerabilities, 1):
+                with st.expander(f"Vulnerability #{i}", expanded=True):
+                    st.markdown("#### Prompt")
+                    st.markdown(vuln["prompt"])
+                    st.markdown("#### Response")
+                    # Extract just the response content if it's a dictionary
+                    response = vuln.get("response", "")
+                    if isinstance(response, dict) and "response" in response:
+                        response = response["response"]
+                    st.markdown(response)
+                    
+                    st.markdown("#### Analysis")
+                    classification = vuln.get("classification", "Unknown")
+                    st.markdown(classification)
+        else:
+            st.info("No vulnerabilities discovered yet.")
+
+def display_metrics(iteration: int, max_iterations: int, vulnerabilities: List[Dict[str, Any]], start_time: float):
+    """Display current metrics."""
+    with st.session_state.metrics_container:
+        col1, col2, col3 = st.columns(3)
+        
+        # Progress
+        progress = iteration / max_iterations
+        col1.metric("Progress", f"{iteration}/{max_iterations}")
+        st.session_state.progress.progress(progress)
+        
+        # Vulnerabilities found
+        col2.metric("Vulnerabilities Found", len(vulnerabilities))
+        
+        # Time elapsed
+        elapsed = time.time() - start_time
+        col3.metric("Time Elapsed", f"{elapsed:.1f}s")
+
+def display_summary(results: Dict[str, Any]):
+    """Display the final summary."""
+    with st.session_state.summary_container:
+        st.markdown("## 📊 Final Summary")
+        
+        # Display summary statistics
+        col1, col2, col3 = st.columns(3)
+        
+        col1.metric("Total Iterations", results["summary"]["total_iterations"])
+        col2.metric("Total Vulnerabilities", results["summary"]["total_vulnerabilities"])
+        col3.metric(
+            "Vulnerability Rate", 
+            f"{results['summary']['vulnerability_rate']*100:.1f}%"
+        )
+        
+        # Display classification breakdown
+        st.markdown("### Response Classifications")
+        classifications = results["summary"]["classifications"]
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Appropriate Refusal", classifications["appropriate_refusal"])
+        col2.metric("Partial Compliance", classifications["partial_compliance"])
+        col3.metric("Full Compliance", classifications["full_compliance"])
+        col4.metric("Error Handling", classifications["error_handling"])
+        
+        # Display output file location
+        st.markdown("### Results File")
+        st.code(results["output_file"])
+        
+        # Add download button for results
+        with open(results["output_file"], "r") as f:
+            st.download_button(
+                label="Download Results",
+                data=f.read(),
+                file_name=results["output_file"].split("/")[-1],
+                mime="application/json"
+            )
 
 async def run_conversational_redteam_with_ui(args, st):
     """
@@ -248,7 +327,7 @@ async def run_conversational_redteam_with_ui(args, st):
         }
     
     # Display configuration
-    display_config(st, args)
+    display_config(args.target_type, args.context, args.redteam_model, args.iterations)
     
     # Initialize progress indicators
     progress = st.progress(0)
@@ -289,22 +368,7 @@ async def run_conversational_redteam_with_ui(args, st):
         status.success("Red-teaming process completed successfully!")
         
         # Display summary
-        with summary_container:
-            st.header("Red-Teaming Summary")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.metric("Total Iterations", results["summary"]["total_iterations"])
-                st.metric("Total Vulnerabilities", results["summary"]["total_vulnerabilities"])
-                st.metric("Vulnerability Rate", f"{results['summary']['vulnerability_rate']:.1%}")
-                
-            with col2:
-                st.markdown("**Model Loading**")
-                st.success("Model loaded successfully") if results["summary"]["model_loaded_successfully"] else st.error("Model loading failed, used fallback prompts")
-                
-                st.markdown("**Results File**")
-                st.code(results.get("output_file", "No output file"))
+        display_summary(results)
         
     except Exception as e:
         status.error(f"Error during red-teaming: {str(e)}")

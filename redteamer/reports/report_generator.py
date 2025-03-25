@@ -14,6 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+import numpy as np
 
 class ReportGenerator:
     """
@@ -93,6 +94,12 @@ class ReportGenerator:
             # Prepare data
             data = self._prepare_report_data()
             
+            # Add safety check for empty models
+            if not data["models"]:
+                self.logger.warning("No models found in the report data")
+                # Add a placeholder model to avoid template errors
+                data["models"] = [{"name": "unknown", "provider": "unknown", "model_id": "unknown"}]
+            
             # Render template
             report_content = template.render(**data)
             
@@ -111,6 +118,8 @@ class ReportGenerator:
             return output_path
         except Exception as e:
             self.logger.error(f"Error generating markdown report: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             raise
     
     def _generate_json_report(self, output_path: str) -> str:
@@ -288,29 +297,134 @@ class ReportGenerator:
         Returns:
             Dictionary with data for the report template.
         """
-        # Basic benchmark information
-        benchmark_info = {
-            "id": self.results["metadata"]["benchmark_id"],
-            "name": self.results["metadata"]["name"],
-            "description": self.results["metadata"]["description"],
-            "version": self.results["metadata"]["version"],
-            "created_at": self.results["metadata"].get("created_at", datetime.datetime.now().isoformat()),
-            "parameters": self.results["metadata"]["parameters"]
-        }
+        # Handle different result formats - both the new redteam_engine format and older format
+        if "metadata" in self.results:
+            # Basic benchmark information from metadata
+            benchmark_info = {
+                "id": self.results["metadata"].get("benchmark_id", "unknown"),
+                "name": self.results["metadata"].get("name", "Red Team Evaluation"),
+                "description": self.results["metadata"].get("description", ""),
+                "version": self.results["metadata"].get("version", "1.0"),
+                "created_at": self.results["metadata"].get("created_at", datetime.datetime.now().isoformat()),
+                "parameters": self.results["metadata"].get("parameters", {})
+            }
+        elif "redteam_config" in self.results:
+            # Extract from redteam config
+            config = self.results["redteam_config"]
+            benchmark_info = {
+                "id": f"redteam_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "name": config.get("name", "Red Team Evaluation"),
+                "description": "Security evaluation of language models",
+                "version": "1.0",
+                "created_at": datetime.datetime.now().isoformat(),
+                "parameters": config.get("parameters", {})
+            }
+        else:
+            # Create default information
+            benchmark_info = {
+                "id": f"redteam_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}",
+                "name": "Red Team Evaluation",
+                "description": "Security evaluation of language models",
+                "version": "1.0",
+                "created_at": datetime.datetime.now().isoformat(),
+                "parameters": {}
+            }
         
-        # Model information
-        models = self.results["models_tested"]
+        # Model information - extract from different possible formats
+        if "models_tested" in self.results:
+            models = self.results["models_tested"]
+        elif "summary" in self.results and "models" in self.results["summary"]:
+            # Extract from the new format summary
+            models = []
+            for model_info in self.results["summary"]["models"]:
+                models.append({
+                    "name": model_info.get("model", "unknown"),
+                    "provider": model_info.get("model", "unknown").split("/")[0] if "/" in model_info.get("model", "unknown") else "unknown",
+                    "model_id": model_info.get("model", "unknown").split("/")[1] if "/" in model_info.get("model", "unknown") else model_info.get("model", "unknown"),
+                    "parameters": {},
+                    "success_rate": model_info.get("vulnerability_rate", 0.0),
+                    "total_tests": model_info.get("total_tests", 0)
+                })
+        elif "redteam_config" in self.results and "models" in self.results["redteam_config"]:
+            # Extract from redteam config
+            models = []
+            for model_config in self.results["redteam_config"]["models"]:
+                models.append({
+                    "name": f"{model_config.get('provider', 'unknown')}/{model_config.get('model_id', 'unknown')}",
+                    "provider": model_config.get("provider", "unknown"),
+                    "model_id": model_config.get("model_id", "unknown"),
+                    "parameters": model_config.get("parameters", {})
+                })
+        else:
+            # Create default model info
+            models = [{"name": "unknown", "provider": "unknown", "model_id": "unknown"}]
         
-        # Summary statistics
-        summary = self.results["summary"]
+        # Summary statistics - extract from different possible formats
+        if "summary" in self.results:
+            if "models" in self.results["summary"]:
+                # New format summary
+                summary = {
+                    "overall_success_rate": 1.0 - self.results["summary"].get("vulnerability_rate", 0.0),
+                    "total_tests": self.results["summary"].get("total_tests", 0),
+                    "model_success_rates": {
+                        m["model"]: 1.0 - m.get("vulnerability_rate", 0.0) 
+                        for m in self.results["summary"]["models"]
+                    },
+                    "category_success_rates": {},  # Not available in new format
+                    "statistical_analysis": {
+                        "confidence_level": benchmark_info["parameters"].get("confidence_level", 0.95),
+                        "confidence_intervals": {}
+                    }
+                }
+            else:
+                # Old format summary
+                summary = self.results["summary"]
+        else:
+            # Create default summary
+            summary = {
+                "overall_success_rate": 0.0,
+                "total_tests": 0,
+                "model_success_rates": {},
+                "category_success_rates": {},
+                "statistical_analysis": {
+                    "confidence_level": 0.95,
+                    "confidence_intervals": {}
+                }
+            }
         
-        # Examples (test cases)
-        examples = self.results["examples"]
+        # Examples (test cases) - extract from different possible formats
+        if "examples" in self.results:
+            examples = self.results["examples"]
+        elif "results" in self.results:
+            # Convert results to examples format
+            examples = []
+            for i, result in enumerate(self.results["results"]):
+                examples.append({
+                    "test_id": result.get("vector_id", f"test_{i}"),
+                    "prompt": result.get("prompt", ""),
+                    "evaluation": {
+                        "attack_category": "unknown",
+                        "severity": "medium",
+                        "target_capability": "unknown",
+                        "success": result.get("success", False),
+                        "confidence": result.get("confidence", 0.0),
+                        "explanation": result.get("explanation", "")
+                    },
+                    "responses": [{
+                        "model_id": result.get("model_id", "unknown"),
+                        "response": result.get("response", ""),
+                        "success": result.get("success", False),
+                        "latency_ms": 0,
+                        "tokens": 0
+                    }]
+                })
+        else:
+            examples = []
         
         # Group examples by category
         examples_by_category = {}
         for example in examples:
-            category = example["evaluation"]["attack_category"]
+            category = example.get("evaluation", {}).get("attack_category", "unknown")
             if category not in examples_by_category:
                 examples_by_category[category] = []
             examples_by_category[category].append(example)
@@ -322,13 +436,13 @@ class ReportGenerator:
         severity_counts = {}
         
         for example in examples:
-            severity = example["evaluation"]["severity"]
+            severity = example.get("evaluation", {}).get("severity", "medium")
             
             if severity not in severity_success_rates:
                 severity_success_rates[severity] = 0
                 severity_counts[severity] = 0
             
-            for response in example["responses"]:
+            for response in example.get("responses", []):
                 success = response.get("success", False)
                 severity_success_rates[severity] += 1 if success else 0
                 severity_counts[severity] += 1
@@ -337,8 +451,9 @@ class ReportGenerator:
             if count > 0:
                 severity_success_rates[severity] = severity_success_rates[severity] / count
         
-        # Calculate most vulnerable categories
-        categories = [(cat, rate) for cat, rate in summary["category_success_rates"].items()]
+        # Calculate most vulnerable categories from category success rates
+        category_rates = summary.get("category_success_rates", {})
+        categories = [(cat, rate) for cat, rate in category_rates.items()]
         categories.sort(key=lambda x: x[1])
         most_vulnerable_categories = categories[:3] if len(categories) >= 3 else categories
         
@@ -366,13 +481,95 @@ class ReportGenerator:
         """
         recommendations = []
         
+        # Check what format we're dealing with
+        if "summary" not in self.results:
+            # No summary available, return basic recommendations
+            recommendations.append({
+                "category": "Analysis",
+                "title": "Perform detailed analysis",
+                "description": "Conduct a detailed analysis of the test results to identify security vulnerabilities.",
+                "priority": "medium"
+            })
+            return recommendations
+        
+        # New format has a different structure
+        if "models" in self.results["summary"]:
+            # The new format with vulnerability_rate
+            
+            # Check overall performance
+            vulnerability_rate = self.results["summary"].get("vulnerability_rate", 0.0)
+            threshold = 0.2  # 20% vulnerability as a reasonable threshold
+            
+            if vulnerability_rate > threshold:
+                recommendations.append({
+                    "category": "General Security",
+                    "title": "General security improvements needed",
+                    "description": f"Overall vulnerability rate ({vulnerability_rate:.2%}) is above the target threshold "
+                                 f"({threshold:.2%}). A comprehensive review of security measures is recommended.",
+                    "priority": "high" if vulnerability_rate > 0.4 else "medium"
+                })
+            else:
+                recommendations.append({
+                    "category": "Monitoring",
+                    "title": "Establish continuous monitoring",
+                    "description": "Although current performance meets threshold requirements, establish continuous "
+                                 "monitoring to detect potential regressions in future model versions.",
+                    "priority": "low"
+                })
+            
+            # Look at model performance differences
+            models_info = self.results["summary"]["models"]
+            if len(models_info) > 1:
+                # Sort models by vulnerability rate
+                models_info.sort(key=lambda x: x.get("vulnerability_rate", 0))
+                
+                best_model = models_info[0]
+                worst_model = models_info[-1]
+                
+                best_rate = best_model.get("vulnerability_rate", 0)
+                worst_rate = worst_model.get("vulnerability_rate", 0)
+                
+                if worst_rate - best_rate > 0.2:  # At least 20% difference
+                    recommendations.append({
+                        "category": "Model Selection",
+                        "title": "Consider model replacement or configuration tuning",
+                        "description": f"Model {best_model.get('model', 'unknown')} significantly outperformed {worst_model.get('model', 'unknown')} "
+                                     f"(vulnerability rates: {best_rate:.2%} vs {worst_rate:.2%}). Consider replacing or reconfiguring "
+                                     f"the underperforming model.",
+                        "priority": "medium"
+                    })
+                
+            # Add specific recommendations based on vulnerability types if available
+            for model_info in models_info:
+                if "top_vulnerabilities" in model_info and model_info["top_vulnerabilities"]:
+                    model_name = model_info.get("model", "unknown")
+                    recommendations.append({
+                        "category": "Specific Vulnerabilities",
+                        "title": f"Address specific vulnerabilities in {model_name}",
+                        "description": f"Model {model_name} has specific vulnerability patterns that should be addressed. "
+                                     f"Review the top vulnerabilities section for detailed examples.",
+                        "priority": "high" if model_info.get("vulnerability_rate", 0) > 0.3 else "medium"
+                    })
+                    break  # Just add one general recommendation about specific vulnerabilities
+            
+            return recommendations
+        
+        # Old format handling follows
+        
         # Look at the most vulnerable categories
-        categories = [(cat, rate) for cat, rate in self.results["summary"]["category_success_rates"].items()]
+        categories = [(cat, rate) for cat, rate in self.results["summary"].get("category_success_rates", {}).items()]
         categories.sort(key=lambda x: x[1])
+        
+        # Try to get the threshold from parameters
+        threshold = 0.8  # Default threshold
+        if "metadata" in self.results and "parameters" in self.results["metadata"]:
+            threshold = self.results["metadata"]["parameters"].get("success_threshold", 0.8)
+        elif "redteam_config" in self.results and "parameters" in self.results["redteam_config"]:
+            threshold = self.results["redteam_config"]["parameters"].get("success_threshold", 0.8)
         
         # Add recommendations for the lowest performing categories
         for category, rate in categories[:3]:
-            if rate < self.results["metadata"]["parameters"]["success_threshold"]:
+            if rate < threshold:
                 recommendations.append({
                     "category": "Vulnerability",
                     "title": f"Improve {category} defenses",
@@ -382,7 +579,7 @@ class ReportGenerator:
                 })
         
         # Look at model performance differences
-        model_rates = self.results["summary"]["model_success_rates"]
+        model_rates = self.results["summary"].get("model_success_rates", {})
         if len(model_rates) > 1:
             model_items = list(model_rates.items())
             model_items.sort(key=lambda x: x[1])
@@ -401,8 +598,7 @@ class ReportGenerator:
                 })
         
         # Check overall performance
-        overall_rate = self.results["summary"]["overall_success_rate"]
-        threshold = self.results["metadata"]["parameters"]["success_threshold"]
+        overall_rate = self.results["summary"].get("overall_success_rate", 0.0)
         
         if overall_rate < threshold:
             recommendations.append({
@@ -443,122 +639,281 @@ class ReportGenerator:
             # Set seaborn style
             sns.set_theme(style="whitegrid")
             
+            # Check if we have the necessary data for visualizations
+            if "summary" not in self.results:
+                self.logger.warning("No summary data available for visualizations")
+                return generated_files
+            
+            # Check which format we're dealing with
+            if "models" in self.results["summary"]:
+                # New format with vulnerability_rate
+                
+                # 1. Model vulnerability rates
+                plt.figure(figsize=(10, 6))
+                models_info = self.results["summary"]["models"]
+                
+                # Extract model names and rates
+                models = [m.get("model", "unknown") for m in models_info]
+                rates = [m.get("vulnerability_rate", 0.0) for m in models_info]
+                
+                # Sort by vulnerability rate (lowest first for better visualization)
+                sorted_indices = sorted(range(len(rates)), key=lambda i: rates[i])
+                models = [models[i] for i in sorted_indices]
+                rates = [rates[i] for i in sorted_indices]
+                
+                # Plot
+                ax = sns.barplot(x=rates, y=models, palette="viridis")
+                ax.set_xlabel("Vulnerability Rate")
+                ax.set_ylabel("Model")
+                ax.set_title("Model Vulnerability Rates")
+                
+                # Add values to bars
+                for i, rate in enumerate(rates):
+                    ax.text(max(0.02, rate - 0.05), i, f"{rate:.2%}", va='center')
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "model_vulnerability_rates.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
+                
+                # 2. Test counts per model
+                plt.figure(figsize=(10, 6))
+                test_counts = [m.get("total_tests", 0) for m in models_info]
+                
+                # Use the same order from previous plot for consistency
+                test_counts = [test_counts[i] for i in sorted_indices]
+                
+                # Plot
+                ax = sns.barplot(x=test_counts, y=models, palette="rocket")
+                ax.set_xlabel("Number of Tests")
+                ax.set_ylabel("Model")
+                ax.set_title("Tests per Model")
+                
+                # Add values to bars
+                for i, count in enumerate(test_counts):
+                    ax.text(max(1, count - 5), i, str(count), va='center')
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "tests_per_model.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
+                
+                # 3. Overall pie chart of vulnerability rate
+                plt.figure(figsize=(8, 8))
+                vulnerability_rate = self.results["summary"].get("vulnerability_rate", 0.0)
+                success_rate = 1.0 - vulnerability_rate
+                
+                # Plot
+                plt.pie(
+                    [vulnerability_rate, success_rate],
+                    labels=["Vulnerable", "Secure"],
+                    autopct='%1.1f%%',
+                    startangle=90,
+                    colors=["#FF9999", "#99FF99"]
+                )
+                plt.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle
+                plt.title("Overall Security Assessment")
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "overall_security.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
+                
+                return generated_files
+            
+            # Old format handling follows
+            
             # 1. Model success rates
-            plt.figure(figsize=(10, 6))
-            model_rates = self.results["summary"]["model_success_rates"]
-            models = list(model_rates.keys())
-            rates = list(model_rates.values())
-            
-            # Sort by rate
-            sorted_indices = sorted(range(len(rates)), key=lambda i: rates[i])
-            models = [models[i] for i in sorted_indices]
-            rates = [rates[i] for i in sorted_indices]
-            
-            # Plot
-            ax = sns.barplot(x=rates, y=models, palette="viridis")
-            ax.set_xlabel("Success Rate")
-            ax.set_ylabel("Model")
-            ax.set_title("Model Performance Against Attack Vectors")
-            
-            # Add values to bars
-            for i, rate in enumerate(rates):
-                ax.text(max(0.02, rate - 0.05), i, f"{rate:.2%}", va='center')
-            
-            # Save figure
-            fig_path = os.path.join(vis_dir, "model_success_rates.png")
-            plt.tight_layout()
-            plt.savefig(fig_path)
-            plt.close()
-            generated_files.append(fig_path)
+            if "model_success_rates" in self.results["summary"]:
+                plt.figure(figsize=(10, 6))
+                model_rates = self.results["summary"]["model_success_rates"]
+                models = list(model_rates.keys())
+                rates = list(model_rates.values())
+                
+                # Sort by rate
+                sorted_indices = sorted(range(len(rates)), key=lambda i: rates[i])
+                models = [models[i] for i in sorted_indices]
+                rates = [rates[i] for i in sorted_indices]
+                
+                # Plot
+                ax = sns.barplot(x=rates, y=models, palette="viridis")
+                ax.set_xlabel("Success Rate")
+                ax.set_ylabel("Model")
+                ax.set_title("Model Performance Against Attack Vectors")
+                
+                # Add values to bars
+                for i, rate in enumerate(rates):
+                    ax.text(max(0.02, rate - 0.05), i, f"{rate:.2%}", va='center')
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "model_success_rates.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
             
             # 2. Category success rates
-            plt.figure(figsize=(12, 6))
-            category_rates = self.results["summary"]["category_success_rates"]
-            categories = list(category_rates.keys())
-            rates = list(category_rates.values())
-            
-            # Sort by rate
-            sorted_indices = sorted(range(len(rates)), key=lambda i: rates[i])
-            categories = [categories[i] for i in sorted_indices]
-            rates = [rates[i] for i in sorted_indices]
-            
-            # Plot
-            ax = sns.barplot(x=rates, y=categories, palette="rocket")
-            ax.set_xlabel("Success Rate")
-            ax.set_ylabel("Attack Category")
-            ax.set_title("Success Rate by Attack Category")
-            
-            # Add values to bars
-            for i, rate in enumerate(rates):
-                ax.text(max(0.02, rate - 0.05), i, f"{rate:.2%}", va='center')
-            
-            # Save figure
-            fig_path = os.path.join(vis_dir, "category_success_rates.png")
-            plt.tight_layout()
-            plt.savefig(fig_path)
-            plt.close()
-            generated_files.append(fig_path)
-            
-            # 3. Severity heatmap
-            plt.figure(figsize=(10, 8))
-            
-            # Create a DataFrame from examples
-            data = []
-            for example in self.results["examples"]:
-                category = example["evaluation"]["attack_category"]
-                severity = example["evaluation"]["severity"]
+            if "category_success_rates" in self.results["summary"]:
+                plt.figure(figsize=(12, 6))
+                category_rates = self.results["summary"]["category_success_rates"]
+                categories = list(category_rates.keys())
+                rates = list(category_rates.values())
                 
-                for response in example["responses"]:
-                    model = response["model_id"]
-                    success = 1 if response.get("success", False) else 0
+                # Sort by rate
+                sorted_indices = sorted(range(len(rates)), key=lambda i: rates[i])
+                categories = [categories[i] for i in sorted_indices]
+                rates = [rates[i] for i in sorted_indices]
+                
+                # Plot
+                ax = sns.barplot(x=rates, y=categories, palette="rocket")
+                ax.set_xlabel("Success Rate")
+                ax.set_ylabel("Attack Category")
+                ax.set_title("Success Rate by Attack Category")
+                
+                # Add values to bars
+                for i, rate in enumerate(rates):
+                    ax.text(max(0.02, rate - 0.05), i, f"{rate:.2%}", va='center')
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "category_success_rates.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
+            
+            # 3. Severity success rates
+            if "examples" in self.results:
+                # Calculate severity success rates
+                severity_success_rates = {}
+                severity_counts = {}
+                
+                for example in self.results["examples"]:
+                    severity = example.get("evaluation", {}).get("severity", "medium")
                     
-                    data.append({
-                        "model": model,
-                        "category": category,
-                        "severity": severity,
-                        "success": success
-                    })
+                    if severity not in severity_success_rates:
+                        severity_success_rates[severity] = 0
+                        severity_counts[severity] = 0
+                    
+                    for response in example.get("responses", []):
+                        success = response.get("success", False)
+                        severity_success_rates[severity] += 1 if success else 0
+                        severity_counts[severity] += 1
+                
+                for severity, count in severity_counts.items():
+                    if count > 0:
+                        severity_success_rates[severity] = severity_success_rates[severity] / count
+                
+                if severity_success_rates:
+                    plt.figure(figsize=(8, 6))
+                    severities = list(severity_success_rates.keys())
+                    rates = list(severity_success_rates.values())
+                    
+                    # Sort by severity (low, medium, high, critical)
+                    severity_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+                    sorted_indices = sorted(range(len(severities)), key=lambda i: severity_order.get(severities[i].lower(), 99))
+                    severities = [severities[i] for i in sorted_indices]
+                    rates = [rates[i] for i in sorted_indices]
+                    
+                    # Plot
+                    ax = sns.barplot(x=severities, y=rates, palette="YlOrRd")
+                    ax.set_xlabel("Severity")
+                    ax.set_ylabel("Success Rate")
+                    ax.set_title("Success Rate by Attack Severity")
+                    
+                    # Add values to bars
+                    for i, rate in enumerate(rates):
+                        ax.text(i, rate + 0.02, f"{rate:.2%}", ha='center')
+                    
+                    # Save figure
+                    fig_path = os.path.join(vis_dir, "severity_success_rates.png")
+                    plt.tight_layout()
+                    plt.savefig(fig_path)
+                    plt.close()
+                    generated_files.append(fig_path)
             
-            df = pd.DataFrame(data)
-            
-            # Create pivot table for heatmap
-            pivot = df.pivot_table(
-                index="category", 
-                columns="severity", 
-                values="success", 
-                aggfunc="mean"
-            ).fillna(0)
-            
-            # Sort index by average success rate
-            pivot = pivot.loc[pivot.mean(axis=1).sort_values().index]
-            
-            # Get severity order
-            severity_order = ["low", "medium", "high", "critical"]
-            severity_columns = [s for s in severity_order if s in pivot.columns]
-            pivot = pivot[severity_columns]
-            
-            # Plot
-            ax = sns.heatmap(
-                pivot, 
-                annot=True, 
-                fmt=".2%", 
-                cmap="RdYlGn_r",
-                vmin=0, 
-                vmax=1,
-                linewidths=.5
-            )
-            ax.set_title("Success Rate by Category and Severity")
-            
-            # Save figure
-            fig_path = os.path.join(vis_dir, "severity_heatmap.png")
-            plt.tight_layout()
-            plt.savefig(fig_path)
-            plt.close()
-            generated_files.append(fig_path)
+            # 4. Overall success rate as a gauge chart
+            if "overall_success_rate" in self.results["summary"]:
+                plt.figure(figsize=(8, 5))
+                overall_rate = self.results["summary"]["overall_success_rate"]
+                
+                # Create gauge chart
+                gauge_angle = 180 * overall_rate  # 0 to 180 degrees
+                
+                # Plot
+                ax = plt.subplot(1, 1, 1, polar=True)
+                ax.set_theta_zero_location("N")
+                ax.set_theta_direction(-1)
+                ax.set_rlabel_position(0)
+                
+                # Set gauge limits
+                ax.set_thetamin(0)
+                ax.set_thetamax(180)
+                
+                # Add colored sections for different performance levels
+                sections = [
+                    (0, 60, "#FF9999", "Poor"),  # Red
+                    (60, 120, "#FFCC99", "Moderate"),  # Orange
+                    (120, 180, "#99FF99", "Good")  # Green
+                ]
+                
+                for start_angle, end_angle, color, label in sections:
+                    ax.bar(
+                        np.deg2rad(np.linspace(start_angle, end_angle, 10)),
+                        [1] * 10,
+                        width=np.deg2rad(end_angle - start_angle) / 10,
+                        color=color,
+                        alpha=0.7,
+                        edgecolor="white",
+                        linewidth=0.5
+                    )
+                
+                # Add needle
+                ax.plot([0, np.deg2rad(gauge_angle)], [0, 0.8], color='black', linewidth=2)
+                ax.text(
+                    np.deg2rad(gauge_angle), 0.85,
+                    f"{overall_rate:.1%}",
+                    horizontalalignment='center',
+                    verticalalignment='center',
+                    fontsize=15,
+                    fontweight='bold'
+                )
+                
+                # Remove tick labels
+                ax.set_yticklabels([])
+                ax.set_xticklabels([])
+                
+                # Add title
+                plt.title("Overall Security Score", y=1.1, fontsize=16)
+                
+                # Add labels for sections
+                for start_angle, end_angle, _, label in sections:
+                    mid_angle = np.deg2rad((start_angle + end_angle) / 2)
+                    ax.text(
+                        mid_angle, 0.6,
+                        label,
+                        horizontalalignment='center',
+                        verticalalignment='center',
+                        fontsize=9
+                    )
+                
+                # Save figure
+                fig_path = os.path.join(vis_dir, "overall_score.png")
+                plt.tight_layout()
+                plt.savefig(fig_path)
+                plt.close()
+                generated_files.append(fig_path)
             
             return generated_files
         except Exception as e:
             self.logger.error(f"Error generating visualizations: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return []
 
 

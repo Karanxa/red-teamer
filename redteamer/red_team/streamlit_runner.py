@@ -11,13 +11,20 @@ import argparse
 import time
 import json
 import asyncio
+import subprocess
 from typing import Dict, List, Optional, Any, Callable
 from pathlib import Path
-
-import streamlit as st
+import tempfile
+from datetime import datetime
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
+
+# Import our Streamlit patch before importing streamlit
+from redteamer.red_team.streamlit_patch import safe_import_streamlit
+
+# Import streamlit safely
+st = safe_import_streamlit()
 
 # Import necessary modules
 from redteamer.red_team.conversational_redteam import ConversationalRedTeam
@@ -30,6 +37,66 @@ from redteamer.red_team.streamlit_ui import (
     display_metrics,
     display_summary
 )
+
+def run_streamlit_app(args):
+    """
+    Launch the Streamlit app with the provided configuration.
+    
+    Args:
+        args: Configuration object containing all necessary parameters
+    """
+    # Create a temporary script to run streamlit with the provided args
+    script_content = f"""
+import streamlit as st
+import asyncio
+import sys
+import traceback
+from redteamer.red_team.streamlit_runner import run_conversational_redteam_with_ui
+
+def robust_runner():
+    try:
+        class Args:
+            def __init__(self):
+                self.target_type = "{args.target_type}"
+                self.model = {repr(args.model)}
+                self.curl_command = {repr(args.curl_command)}
+                self.system_prompt = {repr(args.system_prompt)}
+                self.chatbot_context = "{args.chatbot_context}"
+                self.redteam_model_id = "{args.redteam_model_id}"
+                self.hf_api_key = {repr(args.hf_api_key)}
+                self.max_iterations = {args.max_iterations}
+                self.output_dir = "{args.output_dir}"
+                self.verbose = {args.verbose}
+                self.quant_mode = "{args.quant_mode}"
+        
+        args = Args()
+        asyncio.run(run_conversational_redteam_with_ui(args))
+    except Exception as e:
+        st.error(f"Critical error in Red Teaming process: {{str(e)}}")
+        st.error("Please check the error details below:")
+        st.code(traceback.format_exc())
+        st.warning("Recommendation: Try running with --quant-mode cpu or use a smaller model.")
+
+if __name__ == "__main__":
+    robust_runner()
+"""
+    
+    # Write the temporary script
+    temp_script_path = "temp_streamlit_runner.py"
+    with open(temp_script_path, "w") as f:
+        f.write(script_content)
+    
+    try:
+        # Launch Streamlit with the temporary script
+        subprocess.run(["streamlit", "run", temp_script_path], check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Error launching Streamlit: {e}")
+    finally:
+        # Clean up the temporary script
+        try:
+            os.remove(temp_script_path)
+        except:
+            pass
 
 async def run_conversational_redteam_with_ui(args):
     """
@@ -65,7 +132,7 @@ async def run_conversational_redteam_with_ui(args):
             "max_tokens": 1000
         }
     
-    # Display configuration
+    # Display initial configuration
     display_config(
         target_model_type=args.target_type,
         chatbot_context=args.chatbot_context,
@@ -94,14 +161,31 @@ async def run_conversational_redteam_with_ui(args):
         hf_api_key=args.hf_api_key,
         output_dir=args.output_dir,
         max_iterations=args.max_iterations,
-        verbose=args.verbose
+        verbose=args.verbose,
+        quant_mode=args.quant_mode
     )
     
     try:
         # Load the model
         display_model_loading_status("Loading red-teaming model...")
         redteam._load_local_model()
-        display_model_loading_status("Model loaded successfully")
+        
+        # Update configuration display to show fallback status if needed
+        display_config(
+            target_model_type=args.target_type,
+            chatbot_context=args.chatbot_context,
+            redteam_model_id=redteam.redteam_model_id,  # Use actual model ID which may have changed
+            max_iterations=args.max_iterations,
+            using_fallback=redteam.using_fallback,
+            using_templates=hasattr(redteam, 'using_templates') and redteam.using_templates
+        )
+        
+        if hasattr(redteam, 'using_templates') and redteam.using_templates:
+            display_model_loading_status("Using template-based generation (no model loaded)")
+        elif redteam.using_fallback:
+            display_model_loading_status(f"Using fallback model {redteam.redteam_model_id}")
+        else:
+            display_model_loading_status("Model loaded successfully")
         
         # Configure the target model
         display_model_loading_status("Configuring target model...")
@@ -118,181 +202,32 @@ async def run_conversational_redteam_with_ui(args):
         st.session_state.metrics_container = st.container()
         st.session_state.summary_container = st.container()
         
-        # Start pre-generating the first prompt in parallel
-        redteam.next_prompt_future = asyncio.create_task(
-            redteam._generate_next_prompt_async(redteam.chatbot_context, redteam.conversation_history)
-        )
+        # Start the conversation loop
+        results = await redteam.run_redteam_conversation(model_config)
         
-        # Run the conversation for the specified number of iterations
-        for i in range(redteam.max_iterations):
-            # Update metrics
-            display_metrics(
-                iteration=i,
-                max_iterations=redteam.max_iterations,
-                vulnerabilities=redteam.vulnerabilities,
-                start_time=results["start_time"]
-            )
-            
-            # Get the next prompt (either from the future or generate a new one)
-            if redteam.next_prompt_future:
-                prompt = await redteam.next_prompt_future
-            else:
-                prompt = redteam._generate_adversarial_prompt(
-                    redteam.chatbot_context, 
-                    redteam.conversation_history
-                )
-            
-            # Start generating the next prompt in parallel for the next iteration
-            redteam.next_prompt_future = asyncio.create_task(
-                redteam._generate_next_prompt_async(
-                    redteam.chatbot_context, 
-                    redteam.conversation_history
-                )
-            )
-            
-            # Send the prompt to the target model
-            st.session_state.model_status.info(f"Sending prompt {i+1}/{redteam.max_iterations} to target model...")
-            response = redteam._send_to_target_model(prompt, model_config)
-            
-            # Analyze the response
-            analysis = redteam._analyze_response(prompt, response)
-            
-            # Add to conversation history
-            conversation_entry = {
-                "iteration": i + 1,
-                "prompt": prompt,
-                "response": response,
-                "analysis": analysis,
-                "timestamp": time.time()
-            }
-            
-            redteam.conversation_history.append({
-                "prompt": prompt,
-                "response": response
-            })
-            
-            results["conversation"].append(conversation_entry)
-            
-            # Update vulnerabilities if found
-            if analysis["potential_vulnerability"]:
-                redteam.vulnerabilities.append(analysis)
-                results["vulnerabilities"] = redteam.vulnerabilities
-            
-            # Update UI
-            display_conversation(results["conversation"])
-            display_vulnerabilities(redteam.vulnerabilities)
-            display_metrics(
-                iteration=i + 1,
-                max_iterations=redteam.max_iterations,
-                vulnerabilities=redteam.vulnerabilities,
-                start_time=results["start_time"]
-            )
-            
-            # Sleep briefly to allow UI updates
-            await asyncio.sleep(0.1)
+        # Update final results
+        st.session_state.results = results
         
-        # Cancel any pending prompt generation
-        if redteam.next_prompt_future:
-            redteam.next_prompt_future.cancel()
-        
-        # Compile the final results
-        results["vulnerabilities"] = redteam.vulnerabilities
-        results["end_time"] = time.time()
-        results["duration"] = results["end_time"] - results["start_time"]
-        
-        # Generate summary statistics
-        results["summary"] = {
-            "total_iterations": redteam.max_iterations,
-            "total_vulnerabilities": len(redteam.vulnerabilities),
-            "vulnerability_rate": len(redteam.vulnerabilities) / redteam.max_iterations if redteam.max_iterations > 0 else 0,
-            "classifications": {
-                "appropriate_refusal": sum(1 for entry in results["conversation"] if entry["analysis"]["classification"] == "appropriate_refusal"),
-                "partial_compliance": sum(1 for entry in results["conversation"] if entry["analysis"]["classification"] == "partial_compliance"),
-                "full_compliance": sum(1 for entry in results["conversation"] if entry["analysis"]["classification"] == "full_compliance"),
-                "error_handling": sum(1 for entry in results["conversation"] if entry["analysis"]["classification"] == "error_handling")
-            }
-        }
-        
-        # Save results to file
-        output_file = os.path.join(
-            args.output_dir,
-            f"conv_redteam_{args.target_type}_{int(time.time())}.json"
-        )
-        
-        os.makedirs(args.output_dir, exist_ok=True)
-        
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        results["output_file"] = output_file
-        
-        # Update final UI
-        display_model_loading_status("Conversational red-teaming completed!")
+        # Display final summary
         display_summary(results)
         
-        # Update progress to complete
-        st.session_state.progress.progress(1.0)
-        
     except Exception as e:
-        st.error(f"Error in conversational red-teaming: {str(e)}")
-        if args.verbose:
-            import traceback
-            st.code(traceback.format_exc())
-
-def parse_arguments():
-    """
-    Parse command line arguments.
-    
-    Returns:
-        Parsed arguments
-    """
-    parser = argparse.ArgumentParser(description="Conversational Red-Teaming Scanner")
-    
-    parser.add_argument("--target-type", "-t", required=True,
-                        choices=["curl", "openai", "gemini", "huggingface", "ollama"],
-                        help="Target model type")
-    
-    parser.add_argument("--chatbot-context", "-c", required=True,
-                        help="Description of the chatbot's purpose, usage, and development reasons")
-    
-    parser.add_argument("--redteam-model-id", "-r", 
-                        default="meta-llama/Llama-2-7b-chat-hf",
-                        help="Hugging Face model identifier for the red-teaming model")
-    
-    parser.add_argument("--hf-api-key",
-                        help="Hugging Face API key")
-    
-    parser.add_argument("--model", "-m",
-                        help="Target model name (not needed for curl)")
-    
-    parser.add_argument("--system-prompt", "-s",
-                        help="System prompt for the target model")
-    
-    parser.add_argument("--curl-command",
-                        help="Curl command template with {prompt} and optional {system_prompt} placeholders")
-    
-    parser.add_argument("--max-iterations", "-i", type=int, default=10,
-                        help="Maximum number of conversation iterations")
-    
-    parser.add_argument("--output-dir", "-o", default="results/conversational",
-                        help="Directory to save results")
-    
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Verbose output")
-    
-    return parser.parse_args()
+        st.error(f"Error during red-teaming process: {str(e)}")
+        raise e
 
 if __name__ == "__main__":
-    args = parse_arguments()
+    parser = argparse.ArgumentParser(description="Run Conversational Red-Teaming Scanner with Streamlit UI")
+    parser.add_argument("--target-type", required=True, help="Target model type")
+    parser.add_argument("--model", help="Model name")
+    parser.add_argument("--curl-command", help="Curl command template")
+    parser.add_argument("--system-prompt", help="System prompt")
+    parser.add_argument("--chatbot-context", required=True, help="Chatbot context")
+    parser.add_argument("--redteam-model-id", required=True, help="Red-teaming model ID")
+    parser.add_argument("--hf-api-key", help="HuggingFace API key")
+    parser.add_argument("--max-iterations", type=int, default=10, help="Maximum iterations")
+    parser.add_argument("--output-dir", default="results/conversational", help="Output directory")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--quant-mode", default="auto", help="Quantization mode")
     
-    # Validate arguments
-    if args.target_type == "curl" and not args.curl_command:
-        print("Error: --curl-command is required for curl target type")
-        sys.exit(1)
-    
-    if args.target_type != "curl" and not args.model:
-        print(f"Error: --model is required for {args.target_type} target type")
-        sys.exit(1)
-    
-    # Run the Streamlit app with arguments
+    args = parser.parse_args()
     asyncio.run(run_conversational_redteam_with_ui(args)) 

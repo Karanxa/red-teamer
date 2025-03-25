@@ -16,121 +16,121 @@ from typing import Dict, List, Optional, Union, Any, Callable
 # Import API clients
 import openai
 import anthropic
+import numpy as np
 import google.generativeai as genai
+
+# Import the API key manager
+from redteamer.utils.api_key_manager import get_api_key_manager
 
 # Add custom model connector for curl commands
 class CustomModelConnector:
-    """Connector for custom models via curl commands."""
+    """
+    Connector for custom models using curl commands.
+    This allows users to define their own API or service calls.
+    """
     
     def __init__(self):
+        """Initialize the custom model connector."""
         self.logger = logging.getLogger(__name__)
     
     def generate_completion(self, curl_command: str, prompt: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
         """
-        Generate a completion from a custom model using a curl command.
+        Generate a completion using a custom curl command.
         
         Args:
             curl_command: Curl command template with {prompt} and optional {system_prompt} placeholders
-            prompt: The prompt to send to the model
+            prompt: Prompt to send to the model
             system_prompt: Optional system prompt
-        
+            
         Returns:
-            Dictionary with response and metadata
+            Dictionary with the response text and metadata
         """
-        start_time = time.time()
-        
         try:
-            # Prepare the curl command with the prompt and system prompt
-            filled_command = curl_command
+            # Escape special characters in prompt and system_prompt
+            escaped_prompt = self._escape_shell_text(prompt)
+            escaped_system_prompt = self._escape_shell_text(system_prompt) if system_prompt else ""
             
-            # Escape the prompt and system prompt for shell
-            escaped_prompt = prompt.replace('"', '\\"')
-            
-            # Replace prompt placeholder
-            filled_command = filled_command.replace("{prompt}", escaped_prompt)
-            
-            # Replace system prompt placeholder if it exists
-            if "{system_prompt}" in filled_command and system_prompt:
-                escaped_system_prompt = system_prompt.replace('"', '\\"')
-                filled_command = filled_command.replace("{system_prompt}", escaped_system_prompt)
-            elif "{system_prompt}" in filled_command:
-                # Replace with empty string if no system prompt provided
-                filled_command = filled_command.replace("{system_prompt}", "")
-            
-            self.logger.debug(f"Executing curl command: {filled_command}")
-            
-            # Execute the curl command
-            process = subprocess.Popen(
-                filled_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                shell=True
+            # Replace placeholders in curl command
+            command = curl_command.format(
+                prompt=escaped_prompt,
+                system_prompt=escaped_system_prompt
             )
             
-            stdout, stderr = process.communicate()
+            start_time = time.time()
             
-            # Check if there was an error
-            if process.returncode != 0:
-                error_msg = stderr.decode('utf-8') if stderr else "Unknown error"
-                self.logger.error(f"Curl command failed: {error_msg}")
-                raise Exception(f"Curl command failed: {error_msg}")
+            # Run the curl command
+            result = subprocess.run(command, shell=True, capture_output=True, text=True)
             
-            # Parse the response
-            response_text = stdout.decode('utf-8')
+            if result.returncode != 0:
+                self.logger.error(f"Error running curl command: {result.stderr}")
+                return {
+                    "response_text": f"Error running curl command: {result.stderr}",
+                    "error": True,
+                    "duration": time.time() - start_time
+                }
+            
+            # Handle the output
+            output = result.stdout.strip()
             
             # Try to parse as JSON if it looks like JSON
-            response_data = {}
-            try:
-                if response_text.strip().startswith('{') and response_text.strip().endswith('}'):
-                    response_data = json.loads(response_text)
-                    
-                    # Try to extract the text from common response formats
-                    if 'choices' in response_data and len(response_data['choices']) > 0:
+            if output.startswith('{') and output.endswith('}'):
+                try:
+                    data = json.loads(output)
+                    # Extract text from common response formats
+                    if "choices" in data and len(data["choices"]) > 0:
                         # OpenAI-like format
-                        if 'message' in response_data['choices'][0]:
-                            response_text = response_data['choices'][0]['message'].get('content', '')
-                        elif 'text' in response_data['choices'][0]:
-                            response_text = response_data['choices'][0]['text']
-                    elif 'content' in response_data:
-                        # Anthropic-like format
-                        response_text = response_data['content']
-                    elif 'text' in response_data:
+                        if "message" in data["choices"][0]:
+                            response_text = data["choices"][0]["message"].get("content", "")
+                        else:
+                            response_text = data["choices"][0].get("text", "")
+                    elif "content" in data:
+                        # Claude-like format
+                        response_text = data["content"]
+                    elif "response" in data:
+                        # Custom format
+                        response_text = data["response"]
+                    elif "text" in data:
                         # Simple format
-                        response_text = response_data['text']
-            except json.JSONDecodeError:
-                # Not JSON, use raw response
-                pass
-            
-            # Calculate elapsed time
-            elapsed_time = time.time() - start_time
-            
-            # Estimate token count (rough approximation)
-            prompt_tokens = len(prompt.split())
-            completion_tokens = len(response_text.split())
+                        response_text = data["text"]
+                    else:
+                        # Fallback - return the whole JSON as text
+                        response_text = json.dumps(data, indent=2)
+                except json.JSONDecodeError:
+                    # If not valid JSON, use the raw output
+                    response_text = output
+            else:
+                # Use raw output
+                response_text = output
             
             return {
-                'response_text': response_text,
-                'tokens': prompt_tokens + completion_tokens,
-                'latency': elapsed_time,
-                'response_data': response_data,
-                'token_count': {
-                    'prompt': prompt_tokens,
-                    'completion': completion_tokens,
-                    'total': prompt_tokens + completion_tokens
-                }
+                "response_text": response_text,
+                "duration": time.time() - start_time,
+                "raw_response": output
             }
-                
+        
         except Exception as e:
-            self.logger.error(f"Error generating completion with custom model: {e}")
-            # Calculate elapsed time even for errors
-            elapsed_time = time.time() - start_time
-            
+            self.logger.error(f"Error in CustomModelConnector: {str(e)}")
             return {
-                'response_text': f"Error: {str(e)}",
-                'tokens': 0,
-                'latency': elapsed_time,
-                'error': str(e)
+                "response_text": f"Error generating completion: {str(e)}",
+                "error": True,
+                "duration": 0
             }
+    
+    def _escape_shell_text(self, text: Optional[str]) -> str:
+        """
+        Escape text for shell commands.
+        
+        Args:
+            text: Text to escape
+            
+        Returns:
+            Escaped text
+        """
+        if not text:
+            return ""
+        
+        # Replace single quotes with escaped quotes
+        return text.replace("'", "'\\''").replace('"', '\\"')
 
 class OllamaConnector:
     """Connector for Ollama models."""
@@ -371,13 +371,15 @@ class ModelConnector:
         self._clients = {}
         self.custom_connector = CustomModelConnector()
         self.ollama_connector = OllamaConnector()
+        # Initialize the API key manager
+        self.api_key_manager = get_api_key_manager()
     
     def _get_openai_client(self, api_key: Optional[str] = None, api_base: Optional[str] = None):
         """
         Get an OpenAI client.
         
         Args:
-            api_key: OpenAI API key. If None, uses OPENAI_API_KEY environment variable.
+            api_key: OpenAI API key. If None, uses the key from API key manager or OPENAI_API_KEY env var.
             api_base: OpenAI API base URL. If None, uses default.
             
         Returns:
@@ -391,10 +393,12 @@ class ModelConnector:
             
             # Configure API key
             client_params = {}
-            openai.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+            
+            # Try to get the API key from the parameter, then API key manager, then environment
+            openai.api_key = api_key or self.api_key_manager.get_key("openai") or os.environ.get("OPENAI_API_KEY")
             
             if not openai.api_key:
-                raise ValueError("OpenAI API key not provided and not found in environment variables")
+                raise ValueError("OpenAI API key not provided, not found in API key manager, and not found in environment variables")
             
             # Configure API base if provided
             if api_base:
@@ -413,7 +417,7 @@ class ModelConnector:
         Get an Anthropic client.
         
         Args:
-            api_key: Anthropic API key. If None, uses ANTHROPIC_API_KEY environment variable.
+            api_key: Anthropic API key. If None, uses the key from API key manager or ANTHROPIC_API_KEY env var.
             
         Returns:
             Anthropic client.
@@ -424,11 +428,11 @@ class ModelConnector:
                 self.logger.error("Anthropic package not installed. Install with 'pip install anthropic'")
                 raise ImportError("Anthropic package not installed")
             
-            # Configure API key
-            api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+            # Configure API key - try parameter, then API key manager, then environment
+            api_key = api_key or self.api_key_manager.get_key("anthropic") or os.environ.get("ANTHROPIC_API_KEY")
             
             if not api_key:
-                raise ValueError("Anthropic API key not provided and not found in environment variables")
+                raise ValueError("Anthropic API key not provided, not found in API key manager, and not found in environment variables")
             
             # Create client
             client = anthropic.Anthropic(api_key=api_key)
@@ -443,32 +447,51 @@ class ModelConnector:
         Get a Google Gemini client.
         
         Args:
-            api_key: Google API key. If None, uses GOOGLE_API_KEY environment variable.
+            api_key: Google API key. If None, uses the key from API key manager or GOOGLE_API_KEY env var.
             
         Returns:
-            Configured Google Gemini client
+            A dummy client since we're using direct REST API calls
         """
         try:
-            # Check if Google Generative AI package is installed
-            if importlib.util.find_spec("google.generativeai") is None:
-                self.logger.error("Google Generative AI package not installed. Install with 'pip install google-generativeai'")
-                raise ImportError("Google Generative AI package not installed")
+            # We just need to verify the API key is available since we'll be using 
+            # direct REST API calls instead of the Google client library
             
-            # Configure API key
-            api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+            # Try to get the API key from the parameter, then API key manager, then environment
+            api_key = api_key or self.api_key_manager.get_key("gemini") or os.environ.get("GOOGLE_API_KEY")
             
             if not api_key:
-                raise ValueError("Google API key not provided and not found in environment variables")
+                raise ValueError("Google API key not provided, not found in API key manager, and not found in environment variables")
             
-            # Configure the Gemini API
-            genai.configure(api_key=api_key)
+            # Return a dummy client object to indicate success
+            return {"api_key": api_key}
             
-            # Store a reference to the module as our "client"
-            self._clients["gemini"] = genai
-            return genai
-        
-        except (ImportError, ValueError) as e:
+        except ValueError as e:
             self.logger.error(f"Error initializing Google Gemini client: {e}")
+            raise
+    
+    def _get_huggingface_client(self, api_key: Optional[str] = None):
+        """
+        Get a Hugging Face client.
+        
+        Args:
+            api_key: Hugging Face API key. If None, uses the key from API key manager or HUGGINGFACE_API_KEY env var.
+            
+        Returns:
+            Hugging Face client (or token for API calls)
+        """
+        try:
+            # Try to get the API key from the parameter, then API key manager, then environment
+            api_key = api_key or self.api_key_manager.get_key("huggingface") or os.environ.get("HUGGINGFACE_API_KEY")
+            
+            if not api_key:
+                raise ValueError("Hugging Face API key not provided, not found in API key manager, and not found in environment variables")
+            
+            # For Hugging Face, we just return the API key since different libraries
+            # might be used depending on the specific model
+            return {"api_key": api_key}
+            
+        except ValueError as e:
+            self.logger.error(f"Error initializing Hugging Face client: {e}")
             raise
     
     def _configure_ollama_connector(self, model_config: Dict[str, Any]):
@@ -489,7 +512,7 @@ class ModelConnector:
         Get a client for the specified provider.
         
         Args:
-            provider: Provider name (openai, anthropic, gemini, ollama)
+            provider: Provider name (openai, anthropic, gemini, ollama, huggingface)
             model_config: Model configuration
             
         Returns:
@@ -502,6 +525,7 @@ class ModelConnector:
             if provider == "openai":
                 api_key = None
                 if "api_key_env" in model_config:
+                    # Get key from environment variable if specified
                     api_key = os.environ.get(model_config["api_key_env"])
                 
                 api_base = model_config.get("api_base_url")
@@ -511,6 +535,7 @@ class ModelConnector:
             elif provider == "anthropic":
                 api_key = None
                 if "api_key_env" in model_config:
+                    # Get key from environment variable if specified
                     api_key = os.environ.get(model_config["api_key_env"])
                 
                 self._clients[provider] = self._get_anthropic_client(api_key)
@@ -518,9 +543,18 @@ class ModelConnector:
             elif provider in ["google", "gemini"]:
                 api_key = None
                 if "api_key_env" in model_config:
+                    # Get key from environment variable if specified
                     api_key = os.environ.get(model_config["api_key_env"])
                 
                 self._clients[provider] = self._get_gemini_client(api_key)
+            
+            elif provider == "huggingface":
+                api_key = None
+                if "api_key_env" in model_config:
+                    # Get key from environment variable if specified
+                    api_key = os.environ.get(model_config["api_key_env"])
+                
+                self._clients[provider] = self._get_huggingface_client(api_key)
             
             elif provider == "ollama":
                 # Ollama doesn't need a client, but we'll configure the connector
@@ -736,70 +770,113 @@ class ModelConnector:
         Returns:
             Dictionary with the completion result
         """
-        client = self.get_client("gemini", parameters)
-        
-        # Extract parameters
-        temperature = parameters.get("temperature", 0.7)
-        max_tokens = parameters.get("max_tokens", 1000)
-        
-        # Configure the model
-        model = client.GenerativeModel(model_name=model_id)
-        
-        # Prepare the chat session if system prompt is provided
-        if system_prompt:
-            chat = model.start_chat(history=[
-                {"role": "user", "parts": [system_prompt]},
-                {"role": "model", "parts": ["I'll help you as requested."]}
-            ])
+        try:
+            # Import required libraries
+            import json
+            import requests
             
-            # Make API call
+            # Get the API key - use API key manager first, then try environment variable
+            api_key = self.api_key_manager.get_key("gemini") or os.environ.get("GOOGLE_API_KEY")
+            if not api_key:
+                raise ValueError("Google API key not provided, not found in API key manager, and not found in environment variables")
+            
+            # Extract parameters
+            temperature = parameters.get("temperature", 0.7)
+            max_tokens = parameters.get("max_output_tokens", 1000)
+            
+            # Build request payload
+            if system_prompt:
+                # Include system instructions as a "role" message if provided
+                payload = {
+                    "contents": [
+                        {
+                            "role": "user",
+                            "parts": [{"text": system_prompt}]
+                        },
+                        {
+                            "role": "model",
+                            "parts": [{"text": "I'll help you as requested."}]
+                        },
+                        {
+                            "role": "user",
+                            "parts": [{"text": prompt}]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "maxOutputTokens": max_tokens
+                    }
+                }
+            else:
+                # Simple request with just the prompt
+                payload = {
+                    "contents": [
+                        {
+                            "parts": [{"text": prompt}]
+                        }
+                    ],
+                    "generationConfig": {
+                        "temperature": temperature,
+                        "maxOutputTokens": max_tokens
+                    }
+                }
+            
+            # Prepare the URL - use the exact format as in the curl command
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={api_key}"
+            
+            # Make the API call
+            self.logger.debug(f"Making direct REST API call to Gemini API for model {model_id}")
             start_time = time.time()
-            response = chat.send_message(
-                prompt,
-                generation_config=client.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens
-                )
+            response = requests.post(
+                url,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(payload)
             )
-        else:
-            # Make API call without system prompt
-            start_time = time.time()
-            response = model.generate_content(
-                prompt,
-                generation_config=client.types.GenerationConfig(
-                    temperature=temperature,
-                    max_output_tokens=max_tokens
-                )
-            )
-        
-        end_time = time.time()
-        latency_ms = int((end_time - start_time) * 1000)
-        
-        # Extract response text
-        response_text = response.text
-        
-        # Gemini doesn't provide token counts in the API response
-        # We'll estimate based on characters (roughly 4 chars per token)
-        char_count = len(prompt) + len(response_text)
-        estimated_tokens = char_count // 4
-        
-        # Estimate prompt vs completion split (30/70 split as estimation)
-        prompt_tokens = len(prompt) // 4
-        completion_tokens = len(response_text) // 4
-        
-        token_count = {
-            "prompt": prompt_tokens,
-            "completion": completion_tokens,
-            "total": prompt_tokens + completion_tokens,
-            "estimated": True  # Flag to indicate these are estimated
-        }
-        
-        return {
-            "provider": "gemini",
-            "model_id": model_id,
-            "response_text": response_text,
-            "success": True,
-            "latency_ms": latency_ms,
-            "token_count": token_count,
-            "extra_metrics": {}
-        } 
+            end_time = time.time()
+            latency_ms = int((end_time - start_time) * 1000)
+            
+            # Process the response
+            if response.status_code != 200:
+                raise ValueError(f"Error from Gemini API: {response.status_code} - {response.text}")
+            
+            response_data = response.json()
+            
+            # Extract response text
+            response_text = ""
+            if "candidates" in response_data and response_data["candidates"]:
+                candidate = response_data["candidates"][0]
+                if "content" in candidate and "parts" in candidate["content"]:
+                    parts = candidate["content"]["parts"]
+                    for part in parts:
+                        if "text" in part:
+                            response_text += part["text"]
+            
+            # If no response text was found, use a default message
+            if not response_text:
+                response_text = "No response text found in API response."
+            
+            # Calculate token estimates (Gemini doesn't provide token counts)
+            char_count = len(prompt) + len(response_text)
+            prompt_tokens = len(prompt) // 4
+            completion_tokens = len(response_text) // 4
+            
+            token_count = {
+                "prompt": prompt_tokens,
+                "completion": completion_tokens,
+                "total": prompt_tokens + completion_tokens,
+                "estimated": True  # Flag to indicate these are estimated
+            }
+            
+            return {
+                "provider": "gemini",
+                "model_id": model_id,
+                "response_text": response_text,
+                "success": True,
+                "latency_ms": latency_ms,
+                "token_count": token_count,
+                "extra_metrics": {}
+            }
+            
+        except (ImportError, ValueError, requests.RequestException) as e:
+            self.logger.error(f"Error in Gemini API call: {str(e)}")
+            raise 

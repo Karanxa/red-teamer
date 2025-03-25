@@ -26,6 +26,7 @@ from redteamer.utils.model_connector import ModelConnector
 from redteamer.utils.evaluator import RuleBasedEvaluator, ModelBasedEvaluator, HybridEvaluator
 from redteamer.models import get_all_available_models
 from redteamer.interactive_menu import run as run_interactive_menu
+from redteamer.utils.api_key_manager import get_api_key_manager
 
 # Add contextual red teaming imports
 from redteamer.contextual.redteam_engine import ContextualRedTeamEngine
@@ -60,6 +61,7 @@ dataset_app = typer.Typer(help="Dataset management commands", add_completion=Fal
 report_app = typer.Typer(help="Report generation commands", add_completion=False)
 k8s_app = typer.Typer(help="Kubernetes integration commands", add_completion=False)
 contextual_app = typer.Typer(help="Contextual chatbot red teaming commands", add_completion=False)
+keys_app = typer.Typer(help="API key management commands", add_completion=False)
 
 # Add sub-apps
 app.add_typer(redteam_app, name="redteam")
@@ -68,6 +70,7 @@ app.add_typer(report_app, name="report")
 app.add_typer(k8s_app, name="k8s")
 app.add_typer(contextual_app, name="contextual")
 app.add_typer(demo_app, name="demo")
+app.add_typer(keys_app, name="keys")
 
 # Console for rich output
 console = Console()
@@ -1709,10 +1712,13 @@ def quickstart(
         for directory in ["results", "reports", "datasets"]:
             os.makedirs(directory, exist_ok=True)
         
+        # Get the API key manager
+        api_key_manager = get_api_key_manager()
+        
         # Check for API keys
-        openai_key = os.environ.get("OPENAI_API_KEY")
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-        google_key = os.environ.get("GOOGLE_API_KEY")
+        openai_key = api_key_manager.get_key("openai")
+        anthropic_key = api_key_manager.get_key("anthropic")
+        google_key = api_key_manager.get_key("gemini")
         
         available_providers = []
         if openai_key:
@@ -1752,40 +1758,46 @@ def quickstart(
                 # Ask for OpenAI key
                 if Confirm.ask("Do you have an OpenAI API key?", default=True):
                     key = Prompt.ask("Enter your OpenAI API key", password=True)
-                    os.environ["OPENAI_API_KEY"] = key
+                    api_key_manager.set_key("openai", key)
                     available_providers.append("openai")
-                    console.print("[green]OpenAI API key set for this session[/green]")
+                    console.print("[green]OpenAI API key set permanently[/green]")
                     
                 # Ask for Anthropic key
                 if Confirm.ask("Do you have an Anthropic API key?", default=False):
                     key = Prompt.ask("Enter your Anthropic API key", password=True)
-                    os.environ["ANTHROPIC_API_KEY"] = key
+                    api_key_manager.set_key("anthropic", key)
                     available_providers.append("anthropic")
-                    console.print("[green]Anthropic API key set for this session[/green]")
+                    console.print("[green]Anthropic API key set permanently[/green]")
                     
                 # Ask for Google key
                 if Confirm.ask("Do you have a Google API key for Gemini?", default=False):
                     key = Prompt.ask("Enter your Google API key", password=True)
-                    os.environ["GOOGLE_API_KEY"] = key
+                    api_key_manager.set_key("gemini", key)
                     available_providers.append("gemini")
-                    console.print("[green]Google API key set for this session[/green]")
+                    console.print("[green]Google API key set permanently[/green]")
+                    
+                # Ask for Hugging Face key
+                if Confirm.ask("Do you have a Hugging Face API key?", default=False):
+                    key = Prompt.ask("Enter your Hugging Face API key", password=True)
+                    api_key_manager.set_key("huggingface", key)
+                    console.print("[green]Hugging Face API key set permanently[/green]")
                 
                 if not available_providers:
                     console.print("[red]No API keys were set. Exiting quickstart.[/red]")
-                    console.print("\nTo set up API keys permanently, you can use environment variables:")
-                    console.print("  - OpenAI: export OPENAI_API_KEY=your_key_here")
-                    console.print("  - Anthropic: export ANTHROPIC_API_KEY=your_key_here")
-                    console.print("  - Google/Gemini: export GOOGLE_API_KEY=your_key_here")
+                    console.print("\nTo manage your API keys, use the following commands:")
+                    console.print("  - List keys: redteamer keys list")
+                    console.print("  - Set a key: redteamer keys set <provider>")
+                    console.print("  - Delete a key: redteamer keys delete <provider>")
                     return
                     
-                console.print("\n[green]API keys set up successfully for this session![/green]")
-                console.print("[yellow]Note: These keys are only set for this session. To make them permanent, add them to your environment.[/yellow]")
+                console.print("\n[green]API keys set up successfully![/green]")
+                console.print("[green]These keys are stored securely in your home directory and will be available for future sessions.[/green]")
             else:
                 # Exit
-                console.print("\nTo set up API keys, you can use environment variables:")
-                console.print("  - OpenAI: export OPENAI_API_KEY=your_key_here")
-                console.print("  - Anthropic: export ANTHROPIC_API_KEY=your_key_here")
-                console.print("  - Google/Gemini: export GOOGLE_API_KEY=your_key_here")
+                console.print("\nTo manage your API keys, use the following commands:")
+                console.print("  - List keys: redteamer keys list")
+                console.print("  - Set a key: redteamer keys set <provider>")
+                console.print("  - Delete a key: redteamer keys delete <provider>")
                 console.print("\nPlease set up at least one API key and run quickstart again.")
                 return
         
@@ -3191,7 +3203,9 @@ def menu():
     
     This provides a user-friendly interface to run commands and manage your red team evaluations.
     """
-    run_interactive_menu()
+    # Import the wrapper to avoid checking API keys at startup
+    from redteamer.interactive_menu_wrapper import run_menu
+    run_menu()
 
 @redteam_app.command("conversational")
 def conversational_redteam(
@@ -3339,6 +3353,158 @@ def conversational_redteam(
             import traceback
             console.print(traceback.format_exc())
         raise typer.Exit(1)
+
+# API Key Management commands
+@keys_app.command("set")
+def set_api_key(
+    provider: str = typer.Argument(..., help="Provider name (openai, anthropic, gemini, huggingface)"),
+    key: str = typer.Option(None, "--key", "-k", help="API key value"),
+    interactive: bool = typer.Option(True, "--interactive/--non-interactive", help="Run in interactive mode")
+):
+    """
+    Set an API key for a provider.
+    
+    This key will be securely stored in your home directory and used for future requests.
+    """
+    # Get the API key manager
+    api_key_manager = get_api_key_manager()
+    
+    # Normalize provider name
+    provider = provider.lower()
+    
+    # Validate provider
+    if provider not in api_key_manager.PROVIDER_ENV_VARS:
+        console.print(f"[bold red]Error:[/bold red] Unknown provider: {provider}")
+        console.print(f"Supported providers: {', '.join(p for p in api_key_manager.PROVIDER_ENV_VARS if p != 'google')}")
+        return
+    
+    # Get display name
+    display_name = api_key_manager.PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
+    
+    # If key is not provided, ask interactively
+    if not key and interactive:
+        key = Prompt.ask(f"Enter your {display_name} API key", password=True)
+    
+    if not key:
+        console.print("[bold red]Error:[/bold red] No API key provided.")
+        return
+    
+    # Set the key
+    success = api_key_manager.set_key(provider, key)
+    if success:
+        console.print(f"[bold green]✓[/bold green] {display_name} API key has been set successfully.")
+        env_var = api_key_manager.PROVIDER_ENV_VARS[provider]
+        console.print(f"The key is now available as the {env_var} environment variable.")
+    else:
+        console.print(f"[bold red]Error:[/bold red] Failed to set {display_name} API key.")
+
+@keys_app.command("get")
+def get_api_key(
+    provider: str = typer.Argument(..., help="Provider name (openai, anthropic, gemini, huggingface)")
+):
+    """
+    Check if an API key is available for a provider.
+    """
+    # Get the API key manager
+    api_key_manager = get_api_key_manager()
+    
+    # Normalize provider name
+    provider = provider.lower()
+    
+    # Validate provider
+    if provider not in api_key_manager.PROVIDER_ENV_VARS:
+        console.print(f"[bold red]Error:[/bold red] Unknown provider: {provider}")
+        console.print(f"Supported providers: {', '.join(p for p in api_key_manager.PROVIDER_ENV_VARS if p != 'google')}")
+        return
+    
+    # Get display name
+    display_name = api_key_manager.PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
+    
+    # Check if key exists
+    key = api_key_manager.get_key(provider)
+    if key:
+        masked_key = f"{key[:4]}...{key[-4:]}" if len(key) > 8 else "****"
+        console.print(f"[bold green]✓[/bold green] {display_name} API key is available: {masked_key}")
+    else:
+        console.print(f"[bold red]✗[/bold red] No {display_name} API key found.")
+        env_var = api_key_manager.PROVIDER_ENV_VARS[provider]
+        console.print(f"You can set it using: redteamer keys set {provider}")
+        console.print(f"Or by setting the {env_var} environment variable.")
+
+@keys_app.command("list")
+def list_api_keys():
+    """
+    List all available API keys.
+    """
+    # Get the API key manager
+    api_key_manager = get_api_key_manager()
+    
+    # Get all providers
+    providers = api_key_manager.list_providers()
+    
+    # Create a table
+    table = Table(title="API Keys")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Environment Variable", style="yellow")
+    table.add_column("Key Preview", style="dim")
+    
+    # Add rows to the table
+    for provider in providers:
+        status = "[green]✓ Available[/green]" if provider["has_key"] else "[red]✗ Not Set[/red]"
+        key_preview = provider["key_preview"] if provider["has_key"] else ""
+        table.add_row(
+            provider["display_name"],
+            status,
+            provider["env_var"],
+            key_preview
+        )
+    
+    # Print the table
+    console.print(table)
+    console.print("\nTo set a new key: redteamer keys set <provider> --key <api_key>")
+    console.print("To delete a key: redteamer keys delete <provider>")
+
+@keys_app.command("delete")
+def delete_api_key(
+    provider: str = typer.Argument(..., help="Provider name (openai, anthropic, gemini, huggingface)"),
+    confirm: bool = typer.Option(True, "--confirm/--no-confirm", help="Confirm before deleting")
+):
+    """
+    Delete an API key for a provider.
+    """
+    # Get the API key manager
+    api_key_manager = get_api_key_manager()
+    
+    # Normalize provider name
+    provider = provider.lower()
+    
+    # Validate provider
+    if provider not in api_key_manager.PROVIDER_ENV_VARS:
+        console.print(f"[bold red]Error:[/bold red] Unknown provider: {provider}")
+        console.print(f"Supported providers: {', '.join(p for p in api_key_manager.PROVIDER_ENV_VARS if p != 'google')}")
+        return
+    
+    # Get display name
+    display_name = api_key_manager.PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
+    
+    # Check if key exists
+    key = api_key_manager.get_key(provider)
+    if not key:
+        console.print(f"[bold yellow]Note:[/bold yellow] No {display_name} API key found.")
+        return
+    
+    # Confirm deletion
+    if confirm and not Confirm.ask(f"Are you sure you want to delete the {display_name} API key?"):
+        console.print("Deletion cancelled.")
+        return
+    
+    # Delete the key
+    success = api_key_manager.delete_key(provider)
+    if success:
+        console.print(f"[bold green]✓[/bold green] {display_name} API key has been deleted.")
+    else:
+        console.print(f"[bold red]Error:[/bold red] Failed to delete {display_name} API key.")
 
 if __name__ == "__main__":
     app() 

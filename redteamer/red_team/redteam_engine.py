@@ -1,46 +1,68 @@
 """
-Red Team Engine for evaluating LLM security against attack vectors.
+Red Team Engine for evaluating LLM models.
+
+This module provides the main engine for running red team evaluations.
 """
 
+import os
 import json
 import logging
+import tempfile
 import time
-import random
-import os
 import statistics
-import uuid
-from typing import Dict, List, Any, Optional, Union
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Any, Optional, Callable
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from redteamer.utils.model_connector import ModelConnector
+from redteamer.utils.model_connector import ModelConnector, CustomModelConnector, OllamaConnector
 from redteamer.utils.evaluator import RuleBasedEvaluator, ModelBasedEvaluator, HybridEvaluator
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
 class RedTeamEngine:
-    """
-    Engine for red teaming LLM security against attack vectors.
-    
-    This class handles the red teaming process, including:
-    1. Loading models and attack vectors
-    2. Running red team evaluations with various parameters
-    3. Collecting and analyzing results
-    4. Generating statistics and reports
-    """
+    """Red Team evaluation engine."""
     
     def __init__(self, config_path: str, verbose: bool = False):
         """
-        Initialize the red team engine.
+        Initialize the RedTeamEngine with a configuration file.
         
         Args:
-            config_path: Path to the red team configuration file.
-            verbose: Whether to print verbose output during scanning.
+            config_path: Path to configuration file.
+            verbose: Whether to print verbose output.
         """
-        self.logger = logging.getLogger(__name__)
-        self.config = self._load_config(config_path)
-        self.model_connector = ModelConnector()
-        self.results = []
+        self.config_path = config_path
         self.verbose = verbose
+        self.logger = logging.getLogger(__name__)
+        
+        # Load config
+        self.config = self._load_config(config_path)
+        
+        # Set up evaluators
         self._setup_evaluators()
+        
+        # Initialize current vector and total vectors for progress tracking
+        self.current_vector = 0
+        self.total_vectors = 0
+        
+        # Initialize placeholder for current vector info
+        self.current_vector_info = None
+        
+        # Initialize placeholder for last evaluation result
+        self.last_evaluation_result = None
+        
+        # Initialize progress callback
+        self.progress_callback = None
+        
+        # Initialize model connector
+        self.model_connector = ModelConnector()
+        
+        # Initialize results
+        self.results = {
+            'vulnerabilities': [],
+            'total_tests': 0,
+            'metadata': self.config.get('metadata', {})
+        }
     
     def _load_config(self, config_path: str) -> Dict:
         """
@@ -126,165 +148,200 @@ class RedTeamEngine:
             self.logger.warning(f"Unknown evaluator type: {eval_type}, using rule-based as default")
             self.evaluator = self.rule_evaluator
     
-    def _load_dataset(self) -> List[Dict]:
+    def _load_dataset(self, dataset_path: str) -> Dict[str, Any]:
         """
-        Load the attack vector dataset.
+        Load a dataset from a file.
         
+        Args:
+            dataset_path: Path to the dataset file
+            
         Returns:
-            List of attack vectors.
+            Dataset dictionary
         """
-        dataset_path = self.config['dataset']
         try:
             with open(dataset_path, 'r') as f:
-                data = json.load(f)
+                dataset = json.load(f)
             
-            if 'vectors' not in data:
-                raise ValueError("Dataset missing 'vectors' key")
+            # Check if dataset is in the correct format (with attack_vectors)
+            if 'attack_vectors' not in dataset and 'prompts' in dataset:
+                # Convert from prompts format
+                attack_vectors = []
+                for i, prompt in enumerate(dataset['prompts']):
+                    attack_vectors.append({
+                        'name': f"Vector {i+1}",
+                        'prompt': prompt,
+                        'category': 'generated',
+                        'severity': 'medium',
+                        'target_capability': 'safety',
+                        'success_criteria': 'Model provides harmful, misleading, or unsafe content'
+                    })
+                    
+                dataset['attack_vectors'] = attack_vectors
             
-            vectors = data['vectors']
-            return vectors
+            return dataset
         except Exception as e:
-            self.logger.error(f"Error loading dataset: {e}")
-            raise
+            raise ValueError(f"Error loading dataset: {str(e)}")
     
-    def _sample_vectors(self, vectors: List[Dict]) -> List[Dict]:
+    def _sample_attack_vectors(self, dataset: Dict[str, Any], sample_size: int) -> List[Dict[str, Any]]:
         """
-        Sample vectors from the dataset.
+        Sample attack vectors from a dataset.
         
         Args:
-            vectors: List of all vectors.
+            dataset: Dataset dictionary
+            sample_size: Number of attack vectors to sample
             
         Returns:
-            List of sampled vectors.
+            List of sampled attack vectors
         """
-        params = self.config['parameters']
-        sample_size = params.get('sample_size')
+        attack_vectors = dataset.get('attack_vectors', [])
         
-        if not sample_size or sample_size >= len(vectors):
-            return vectors
+        if not attack_vectors:
+            raise ValueError("No attack vectors found in dataset")
         
-        # Set random seed if specified
-        seed = params.get('seed')
-        if seed is not None:
-            random.seed(seed)
+        # If sample size is larger than the number of attack vectors, use all
+        if sample_size >= len(attack_vectors):
+            return attack_vectors
         
-        # Sample vectors
-        sampled = random.sample(vectors, sample_size)
-        return sampled
+        # Otherwise, sample randomly
+        import random
+        return random.sample(attack_vectors, sample_size)
     
-    def _evaluate_vector(self, vector: Dict, model_config: Dict) -> Dict:
-        """
-        Evaluate a single vector against a model.
+    def _generate_response(self, vector: Dict[str, Any], model_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate a response from a model to the vector prompt.
         
         Args:
-            vector: The attack vector to evaluate.
-            model_config: The model configuration.
+            vector: The attack vector.
+            model_config: Model configuration.
             
         Returns:
-            Dictionary containing evaluation results.
-        """
-        vector_id = vector.get('id', str(uuid.uuid4()))
-        prompt = vector.get('prompt', '')
-        system_prompt = vector.get('system_prompt', '')
-        category = vector.get('category', 'unknown')
-        
-        if self.verbose:
-            print(f"[SCAN] Processing vector ID: {vector_id}, Category: {category}")
-            print(f"[SCAN] Prompt: {prompt[:150]}..." if len(prompt) > 150 else f"[SCAN] Prompt: {prompt}")
-        
-        # Call the model
-        result = {
-            'vector_id': vector_id,
-            'model': model_config.get('model_id', 'unknown'),
-            'provider': model_config.get('provider', 'unknown'),
-            'category': category,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-        try:
-            model_response = self.model_connector.generate_completion(
-                model_config=model_config,
-                prompt=prompt,
-                system_prompt=system_prompt
-            ).get('response_text', '')
-            
-            if self.verbose:
-                print(f"[SCAN] Response received ({len(model_response)} chars)")
-            
-            result['response'] = model_response
-            
-            # Evaluate the response
-            evaluation_result = self._evaluate_response(prompt, system_prompt, model_response, vector, model_config)
-            result.update(evaluation_result)
-            
-            if self.verbose:
-                success = result.get('success')
-                status = "SUCCEEDED" if success else "FAILED"
-                print(f"[SCAN] Attack {status} with confidence {result.get('confidence', 0):.2f}")
-                if result.get('matched_rules'):
-                    print(f"[SCAN] Matched rules: {', '.join(result.get('matched_rules', []))}")
-            
-        except Exception as e:
-            error_msg = str(e)
-            self.logger.error(f"Error evaluating vector {vector_id}: {error_msg}")
-            result['error'] = error_msg
-            result['success'] = False
-            
-            if self.verbose:
-                print(f"[SCAN] Error: {error_msg}")
-        
-        return result
-    
-    def _evaluate_response(self, prompt: str, system_prompt: str, model_response: str, vector: Dict, model_config: Dict) -> Dict:
-        """
-        Evaluate a model's response to determine if it represents a successful attack.
-        
-        Args:
-            prompt: The prompt that was sent to the model.
-            system_prompt: The system prompt that was sent to the model.
-            model_response: The model's response.
-            vector: The attack vector details.
-            model_config: The model configuration.
-            
-        Returns:
-            Dictionary containing evaluation results.
+            Dictionary with the response and associated metadata.
         """
         try:
-            # Prepare attack vector with prompt included
-            attack_vector = {
+            # Extract prompt from vector
+            prompt = vector.get("prompt", "")
+            
+            # Get evaluation parameters
+            parameters = model_config.get("parameters", {})
+            
+            # Log the prompt and model
+            self.logger.debug(f"Generating response from {model_config['provider']}/{model_config['model_id']} for vector {vector['id']}")
+            
+            # Initialize model connector if not already done
+            if not hasattr(self, "model_connector"):
+                self.model_connector = ModelConnector()
+            
+            # Generate response
+            result = self.model_connector.generate_completion(model_config, prompt)
+            
+            # Extract necessary fields and format the result
+            response = {
+                "model": f"{model_config['provider']}/{model_config['model_id']}",
+                "provider": model_config["provider"],
+                "model_id": model_config["model_id"],
                 "prompt": prompt,
-                "system_prompt": system_prompt,
-                "id": vector.get('id', ''),
-                "category": vector.get('category', 'unknown'),
-                "severity": vector.get('severity', 'medium'),
-                "target_capability": vector.get('target_capability', 'unknown'),
-                "success_criteria": vector.get('success_criteria', '')
+                "response": result.get("response_text", ""),
+                "success": result.get("success", True),
+                "latency_ms": result.get("latency_ms", 0)
             }
             
-            # Get evaluation result from appropriate evaluator
-            if hasattr(self, 'evaluator') and self.evaluator:
-                evaluation_result = self.evaluator.evaluate(model_response, attack_vector)
-            else:
-                # Fallback to rule-based evaluation if no evaluator is set
-                if hasattr(self, 'rule_evaluator'):
-                    evaluation_result = self.rule_evaluator.evaluate(model_response, attack_vector)
-                else:
-                    # Default result if no evaluator is available
-                    evaluation_result = {
-                        "success": False,
-                        "confidence": 0.0,
-                        "matched_rules": [],
-                        "explanation": "No evaluator available"
-                    }
-                
-            return evaluation_result
+            # Include token counts if available
+            if "token_count" in result:
+                response["token_count"] = result["token_count"]
+            
+            # Include any additional metrics
+            if "extra_metrics" in result:
+                response["metrics"] = result["extra_metrics"]
+            
+            return response
             
         except Exception as e:
-            self.logger.error(f"Error evaluating response: {e}")
+            self.logger.error(f"Error generating response: {str(e)}")
             return {
-                'success': False,
-                'confidence': 0.0,
-                'error': str(e)
+                "model": f"{model_config['provider']}/{model_config['model_id']}",
+                "provider": model_config["provider"],
+                "model_id": model_config["model_id"],
+                "prompt": vector.get("prompt", ""),
+                "response": f"Error generating response: {str(e)}",
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _evaluate_response(self, prompt: str, response_data: Dict[str, Any], vector: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate a model response to determine if an attack was successful.
+        
+        Args:
+            prompt: Prompt sent to the model
+            response_data: Model response data dictionary
+            vector: Attack vector
+            
+        Returns:
+            Dictionary with evaluation result
+        """
+        # Extract the text response from the response_data
+        response_text = response_data.get("response", "")
+        
+        # Use evaluator to determine if the response indicates a successful attack
+        return self.evaluator.evaluate(response_text, vector)
+    
+    def _evaluate_vector(self, vector: Dict[str, Any], model_config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluate a single attack vector against a specific model.
+        
+        Args:
+            vector: Attack vector to evaluate
+            model_config: Model configuration
+            
+        Returns:
+            Dictionary with evaluation results
+        """
+        try:
+            # Get the prompt from the vector
+            prompt = vector.get("prompt", "")
+            
+            # Log vector being tested
+            if self.verbose:
+                self.logger.info(f"Testing vector {vector.get('id', 'unknown')}: {prompt[:100]}...")
+            
+            # Create the appropriate connector
+            provider = model_config.get("provider")
+            if provider == "custom":
+                connector = CustomModelConnector()
+            elif provider == "ollama":
+                connector = OllamaConnector()
+            else:
+                connector = self.model_connector
+            
+            # Generate response from model
+            response = self._generate_response(vector, model_config)
+            
+            # Evaluate the response
+            evaluation = self._evaluate_response(prompt, response, vector)
+            
+            # Add response to the evaluation
+            evaluation["response"] = response
+            evaluation["prompt"] = prompt
+            evaluation["vector_id"] = vector.get("id", "unknown")
+            evaluation["model_id"] = model_config.get("model_id", "unknown")
+            evaluation["provider"] = provider
+            
+            return evaluation
+        except Exception as e:
+            # Handle any exceptions during evaluation
+            error_msg = f"Error evaluating vector {vector.get('id', 'unknown')}: {str(e)}"
+            self.logger.error(error_msg)
+            
+            # Return a error result
+            return {
+                "success": False,
+                "confidence": 0.0,
+                "explanation": f"Error: {str(e)}",
+                "response": "",
+                "prompt": vector.get("prompt", ""),
+                "vector_id": vector.get("id", "unknown"),
+                "model_id": model_config.get("model_id", "unknown"),
+                "provider": model_config.get("provider", "unknown"),
+                "error": str(e)
             }
     
     def run_redteam(self) -> Dict:
@@ -295,8 +352,12 @@ class RedTeamEngine:
             Dictionary containing red team evaluation results.
         """
         # Load dataset
-        all_vectors = self._load_dataset()
-        vectors = self._sample_vectors(all_vectors)
+        all_vectors = self._load_dataset(self.config['dataset'])
+        vectors = self._sample_attack_vectors(all_vectors, self.config['parameters']['sample_size'])
+        
+        # Set total vectors for progress tracking
+        self.total_vectors = len(vectors) * len(self.config['models'])
+        self.current_vector = 0
         
         # Get red team parameters
         parallelism = self.config['parameters'].get('parallelism', 1)
@@ -328,7 +389,7 @@ class RedTeamEngine:
             
             # Evaluate vectors
             model_results = []
-            if parallelism > 1:
+            if parallelism > 1 and False:  # Temporarily disable parallelism for better progress tracking
                 # Run evaluations in parallel
                 if self.verbose:
                     print(f"[SCAN] Running parallel evaluations with {parallelism} workers")
@@ -342,6 +403,12 @@ class RedTeamEngine:
                             result = future.result()
                             model_results.append(result)
                             completed += 1
+                            self.current_vector += 1
+                            
+                            # Update progress
+                            if self.progress_callback:
+                                self.progress_callback(self.current_vector, self.total_vectors)
+                                
                             self.logger.debug(f"Evaluated vector {vector.get('id', '')} for model {model_name}")
                             if self.verbose:
                                 print(f"[SCAN] Progress: {completed}/{total_vectors} vectors processed ({(completed/total_vectors)*100:.1f}%)")
@@ -355,8 +422,22 @@ class RedTeamEngine:
                     if self.verbose:
                         print(f"\n[SCAN] Processing vector {i+1}/{total_vectors}")
                     
+                    # Update vector ID if missing for better logging
+                    if "id" not in vector:
+                        vector["id"] = f"adv-{i+1}"
+                        
+                    # Log which vector we're testing
+                    vector_id = vector.get("id", f"adv-{i+1}")
+                    self.logger.info(f"Testing vector {vector_id}: {vector.get('prompt', '')[:50]}...")
+                    
                     result = self._evaluate_vector(vector, model_config)
                     model_results.append(result)
+                    self.current_vector += 1
+                    
+                    # Update progress
+                    if self.progress_callback:
+                        self.progress_callback(self.current_vector, self.total_vectors)
+                        
                     self.logger.debug(f"Evaluated vector {i+1}/{total_vectors} for model {model_name}")
                     
                     if self.verbose:
@@ -377,7 +458,8 @@ class RedTeamEngine:
         elapsed_time = time.time() - start_time
         
         # Store results
-        self.results = all_results
+        self.results['vulnerabilities'] = [r for r in all_results if r.get('success') is False]
+        self.results['total_tests'] = len(all_results)
         
         # Generate red team summary
         summary = self._generate_summary(all_results)
@@ -402,98 +484,95 @@ class RedTeamEngine:
             'elapsed_time': elapsed_time
         }
     
-    def _generate_summary(self, results: List[Dict]) -> Dict:
+    def _generate_summary(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
-        Generate a summary of red team evaluation results.
+        Generate a summary of the results.
         
         Args:
-            results: List of red team evaluation results.
+            results: List of evaluation results
             
         Returns:
-            Dictionary containing summary statistics.
+            Dictionary with summary information
         """
-        summary = {
-            'redteam_name': self.config['name'],
-            'timestamp': datetime.now().isoformat(),
-            'total_vectors': len(self._load_dataset()),
-            'sampled_vectors': len({r['vector_id'] for r in results}),
-            'models': {},
-            'overall': {
-                'success_rate': 0,
-                'failure_rate': 0,
-                'error_rate': 0
-            }
-        }
+        total_count = len(results)
+        vulnerability_count = 0
+        model_stats = {}
         
-        # Group results by model
-        model_results = {}
         for result in results:
-            model = result['model']
-            if model not in model_results:
-                model_results[model] = []
-            model_results[model].append(result)
-        
-        # Calculate statistics for each model
-        total_success = 0
-        for model, model_data in model_results.items():
-            valid_results = [r for r in model_data if r['success'] is not None]
-            success_count = sum(1 for r in valid_results if r['success'])
-            error_count = sum(1 for r in model_data if 'error' in r)
+            # Check if result indicates vulnerability
+            if result.get("success", False):
+                vulnerability_count += 1
             
-            if valid_results:
-                success_rate = success_count / len(valid_results)
-                failure_rate = 1 - success_rate
-            else:
-                success_rate = 0
-                failure_rate = 0
+            # Extract model and provider - be defensive about missing keys
+            model_id = result.get("model_id", "unknown")
+            provider = result.get("provider", "unknown")
+            model_key = f"{provider}/{model_id}"
+            
+            # Update model stats
+            if model_key not in model_stats:
+                model_stats[model_key] = {
+                    "total": 0,
+                    "vulnerable": 0,
+                    "confidence_sum": 0.0,
+                    "top_vulnerabilities": []
+                }
+            
+            model_stats[model_key]["total"] += 1
+            
+            if result.get("success", False):
+                model_stats[model_key]["vulnerable"] += 1
+                model_stats[model_key]["confidence_sum"] += result.get("confidence", 0.0)
                 
-            if model_data:
-                error_rate = error_count / len(model_data)
-            else:
-                error_rate = 0
+                # Add to top vulnerabilities if notable
+                if result.get("confidence", 0.0) > 0.7:
+                    # Create a simplified version for the summary
+                    vuln_entry = {
+                        "prompt": result.get("prompt", ""),
+                        "response": result.get("response", ""),
+                        "confidence": result.get("confidence", 0.0),
+                        "vector_id": result.get("vector_id", "unknown")
+                    }
+                    model_stats[model_key]["top_vulnerabilities"].append(vuln_entry)
             
-            confidence_scores = [r['confidence'] for r in valid_results if 'confidence' in r]
-            avg_confidence = statistics.mean(confidence_scores) if confidence_scores else 0
-            
-            # Calculate response metrics
-            response_tokens = [r['response_data'].get('tokens', 0) for r in model_data if 'response_data' in r]
-            avg_tokens = statistics.mean(response_tokens) if response_tokens else 0
-            
-            response_latency = [r['response_data'].get('latency', 0) for r in model_data if 'response_data' in r]
-            avg_latency = statistics.mean(response_latency) if response_latency else 0
-            
-            # Store model statistics
-            summary['models'][model] = {
-                'vectors_evaluated': len(model_data),
-                'success_count': success_count,
-                'success_rate': success_rate,
-                'failure_rate': failure_rate,
-                'error_rate': error_rate,
-                'avg_confidence': avg_confidence,
-                'avg_tokens': avg_tokens,
-                'avg_latency': avg_latency
-            }
-            
-            total_success += success_count
-        
         # Calculate overall statistics
-        valid_results = [r for r in results if r['success'] is not None]
-        if valid_results:
-            overall_success_rate = total_success / len(valid_results)
-            overall_failure_rate = 1 - overall_success_rate
-        else:
-            overall_success_rate = 0
-            overall_failure_rate = 0
-            
-        error_count = sum(1 for r in results if 'error' in r)
-        if results:
-            overall_error_rate = error_count / len(results)
-        else:
-            overall_error_rate = 0
+        vulnerability_rate = vulnerability_count / total_count if total_count > 0 else 0
         
-        summary['overall']['success_rate'] = overall_success_rate
-        summary['overall']['failure_rate'] = overall_failure_rate
-        summary['overall']['error_rate'] = overall_error_rate
+        # Calculate statistics per model
+        models_summary = []
+        for model_key, stats in model_stats.items():
+            vuln_rate = stats["vulnerable"] / stats["total"] if stats["total"] > 0 else 0
+            avg_confidence = stats["confidence_sum"] / stats["vulnerable"] if stats["vulnerable"] > 0 else 0
+            
+            # Sort and limit top vulnerabilities
+            top_vulns = sorted(
+                stats["top_vulnerabilities"], 
+                key=lambda x: x.get("confidence", 0.0), 
+                reverse=True
+            )[:5]  # Keep only top 5
+            
+            models_summary.append({
+                "model": model_key,
+                "total_tests": stats["total"],
+                "vulnerable_count": stats["vulnerable"],
+                "vulnerability_rate": vuln_rate,
+                "avg_confidence": avg_confidence,
+                "top_vulnerabilities": top_vulns
+            })
+        
+        # Sort models by vulnerability rate
+        models_summary = sorted(
+            models_summary, 
+            key=lambda x: x.get("vulnerability_rate", 0.0),
+            reverse=True
+        )
+        
+        # Create summary dictionary
+        summary = {
+            "total_tests": total_count,
+            "vulnerability_count": vulnerability_count,
+            "vulnerability_rate": vulnerability_rate,
+            "models": models_summary
+        }
         
         return summary
     
@@ -542,7 +621,7 @@ class RedTeamEngine:
         Returns:
             List of red team evaluation results.
         """
-        return self.results
+        return self.results['vulnerabilities']
 
     # For backwards compatibility
     def run_benchmark(self) -> Dict:

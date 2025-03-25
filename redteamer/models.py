@@ -91,10 +91,21 @@ def get_openai_models() -> Dict[str, Dict[str, Any]]:
         Dictionary of available models with their configurations
     """
     models = {}
+    
+    # First try to get the API key from environment
     api_key = os.environ.get("OPENAI_API_KEY")
     
+    # If not found in environment, try to get it from the API key manager
     if not api_key:
-        logger.info("OpenAI API key not found in environment variables")
+        try:
+            from redteamer.utils.api_key_manager import get_api_key_manager
+            api_key_manager = get_api_key_manager()
+            api_key = api_key_manager.get_key("openai")
+        except Exception as e:
+            logger.warning(f"Error getting API key from manager: {str(e)}")
+    
+    if not api_key:
+        logger.info("OpenAI API key not found in environment variables or API key manager")
         return DEFAULT_MODELS.get("openai", {})
     
     try:
@@ -139,20 +150,90 @@ def get_openai_models() -> Dict[str, Dict[str, Any]]:
 
 def get_anthropic_models() -> Dict[str, Dict[str, Any]]:
     """
-    Get Anthropic models (currently using defaults as optional).
+    Fetch available models from Anthropic API.
     
     Returns:
         Dictionary of available models with their configurations
     """
-    # For now, just return the default Anthropic models
-    # In the future, this could be expanded to fetch models from Anthropic API
-    anthropic_models = DEFAULT_MODELS.get("anthropic", {})
+    models = {}
     
-    # Add a note that these are default models
-    for model_config in anthropic_models.values():
-        model_config["note"] = "API key required"
+    # First try to get the API key from environment
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
     
-    return anthropic_models
+    # If not found in environment, try to get it from the API key manager
+    if not api_key:
+        try:
+            from redteamer.utils.api_key_manager import get_api_key_manager
+            api_key_manager = get_api_key_manager()
+            api_key = api_key_manager.get_key("anthropic")
+        except Exception as e:
+            logger.warning(f"Error getting API key from manager: {str(e)}")
+    
+    if not api_key:
+        logger.info("Anthropic API key not found in environment variables or API key manager")
+        return DEFAULT_MODELS.get("anthropic", {})
+    
+    try:
+        # Check if anthropic package is installed
+        import importlib.util
+        anthropic_spec = importlib.util.find_spec("anthropic")
+        
+        if anthropic_spec is None:
+            logger.warning("Anthropic package not installed. Install with: pip install anthropic")
+            return DEFAULT_MODELS.get("anthropic", {})
+        
+        # Import the Anthropic module
+        import anthropic
+        
+        # Create client
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        # Fetch available models (currently hardcoded as the API doesn't provide a list endpoint)
+        # These are the standard Claude models
+        anthropic_models = {
+            "claude-3-opus-20240229": {
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "api_key_env": "ANTHROPIC_API_KEY"
+            },
+            "claude-3-sonnet-20240229": {
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "api_key_env": "ANTHROPIC_API_KEY" 
+            },
+            "claude-3-haiku-20240307": {
+                "temperature": 0.7,
+                "max_tokens": 4096,
+                "api_key_env": "ANTHROPIC_API_KEY"
+            }
+        }
+        
+        # Test connection by making a simple API call
+        try:
+            # Simple message just to test connectivity
+            response = client.messages.create(
+                model="claude-3-haiku-20240307",
+                max_tokens=10,
+                messages=[
+                    {"role": "user", "content": "Hello"}
+                ]
+            )
+            logger.info("Anthropic API connection successful")
+            
+            # Add simplified model aliases
+            anthropic_models["claude-3-opus"] = anthropic_models["claude-3-opus-20240229"].copy()
+            anthropic_models["claude-3-sonnet"] = anthropic_models["claude-3-sonnet-20240229"].copy()
+            anthropic_models["claude-3-haiku"] = anthropic_models["claude-3-haiku-20240307"].copy()
+        
+        except Exception as e:
+            logger.warning(f"Could not verify Anthropic API connection: {str(e)}")
+            # Still return the models as they might work
+            
+        return anthropic_models
+        
+    except Exception as e:
+        logger.error(f"Error setting up Anthropic client: {str(e)}")
+        return DEFAULT_MODELS.get("anthropic", {})
 
 def get_gemini_models() -> Dict[str, Dict[str, Any]]:
     """
@@ -162,10 +243,21 @@ def get_gemini_models() -> Dict[str, Dict[str, Any]]:
         Dictionary of available models with their configurations
     """
     models = {}
+    
+    # First try to get the API key from environment
     api_key = os.environ.get("GOOGLE_API_KEY")
     
+    # If not found in environment, try to get it from the API key manager
     if not api_key:
-        logger.info("Google API key not found in environment variables")
+        try:
+            from redteamer.utils.api_key_manager import get_api_key_manager
+            api_key_manager = get_api_key_manager()
+            api_key = api_key_manager.get_key("gemini")
+        except Exception as e:
+            logger.warning(f"Error getting API key from manager: {str(e)}")
+    
+    if not api_key:
+        logger.info("Google API key not found in environment variables or API key manager")
         return DEFAULT_MODELS.get("gemini", {})
     
     try:
@@ -179,32 +271,39 @@ def get_gemini_models() -> Dict[str, Dict[str, Any]]:
         
         # Import the Google Generative AI module
         import google.generativeai as genai
+        import httpx
         
-        # Configure with API key
-        genai.configure(api_key=api_key)
+        # Configure with API key and a longer timeout
+        genai.configure(api_key=api_key, transport=httpx.HTTPTransport(timeout=30.0))
         
-        # Fetch available models
-        model_list = genai.list_models()
-        
-        for model in model_list:
-            # Filter for Gemini models only
-            if "gemini" in model.name.lower():
-                # Extract the model ID from the full name (e.g., "models/gemini-pro" -> "gemini-pro")
-                model_id = model.name.split('/')[-1]
-                
-                # Add model to the list
-                models[model_id] = {
-                    "temperature": 0.7,
-                    "max_tokens": 1024,  # Default value
-                    "api_key_env": "GOOGLE_API_KEY"
-                }
-                
-                # Use higher token limit for Pro models
-                if "pro" in model_id.lower():
-                    models[model_id]["max_tokens"] = 2048
-        
-        logger.info(f"Fetched {len(models)} models from Google Gemini API")
-        return models
+        # Try fetching models with explicit timeout
+        try:
+            # Fetch available models
+            model_list = genai.list_models()
+            
+            for model in model_list:
+                # Filter for Gemini models only
+                if "gemini" in model.name.lower():
+                    # Extract the model ID from the full name (e.g., "models/gemini-pro" -> "gemini-pro")
+                    model_id = model.name.split('/')[-1]
+                    
+                    # Add model to the list
+                    models[model_id] = {
+                        "temperature": 0.7,
+                        "max_tokens": 1024,  # Default value
+                        "api_key_env": "GOOGLE_API_KEY"
+                    }
+                    
+                    # Use higher token limit for Pro models
+                    if "pro" in model_id.lower():
+                        models[model_id]["max_tokens"] = 2048
+            
+            logger.info(f"Fetched {len(models)} models from Google Gemini API")
+            return models
+        except httpx.ReadTimeout:
+            logger.warning("Google Gemini API request timed out. Using default models")
+            # Fall back to default models if we get a timeout
+            return DEFAULT_MODELS.get("gemini", {})
         
     except Exception as e:
         logger.error(f"Error fetching Google Gemini models: {str(e)}")
@@ -275,15 +374,39 @@ def get_ollama_models() -> Dict[str, Dict[str, Any]]:
     # If all methods fail, return default models
     return DEFAULT_MODELS.get("ollama", {})
 
-def get_all_available_models() -> Dict[str, Dict[str, Dict[str, Any]]]:
+def get_all_available_models(provider=None) -> Dict[str, Dict[str, Dict[str, Any]]]:
     """
-    Get all available models from all providers.
+    Get available models from all providers or a specific provider.
+    
+    Args:
+        provider: Optional provider to get models for. If None, gets models from all providers.
     
     Returns:
         Dictionary of providers and their available models
     """
     available_models = {}
     
+    # If provider is specified, only get models for that provider
+    if provider:
+        if provider == "openai":
+            openai_models = get_openai_models()
+            if openai_models:
+                available_models["openai"] = openai_models
+        elif provider == "anthropic":
+            anthropic_models = get_anthropic_models()
+            if anthropic_models:
+                available_models["anthropic"] = anthropic_models
+        elif provider == "gemini":
+            gemini_models = get_gemini_models()
+            if gemini_models:
+                available_models["gemini"] = gemini_models
+        elif provider == "ollama":
+            ollama_models = get_ollama_models()
+            if ollama_models:
+                available_models["ollama"] = ollama_models
+        return available_models
+    
+    # Otherwise, get models from all providers
     # OpenAI models
     openai_models = get_openai_models()
     if openai_models:
